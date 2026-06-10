@@ -1,0 +1,12 @@
+[package]
+name = "mvx-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mvx-core = { path = "../mvx-core" }
+pipewire = { version = "0.10.1", features = ["v1_2_0"] }
+rtrb.workspace = true
+tracing.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "mvx-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mvx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mvx-core = { path = "../mvx-core" }
+mvx-ipc = { path = "../mvx-ipc" }
+ratatui.workspace = true
+serde_json.workspace = true

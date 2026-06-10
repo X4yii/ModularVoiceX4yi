@@ -1,0 +1,15 @@
+[package]
+name = "mvx-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mvx-tray"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+ksni.workspace = true
+mvx-core = { path = "../mvx-core" }
+mvx-ipc = { path = "../mvx-ipc" }

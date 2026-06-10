@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MVX
+Comment=Modulador de voz ModularVoiceX4yi
+Exec=mvx tui
+Icon=audio-input-microphone
+Terminal=true
+Categories=AudioVideo;Audio;Utility;
+Keywords=voice;microphone;pipewire;audio;

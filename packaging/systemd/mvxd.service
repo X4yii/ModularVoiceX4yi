@@ -1,0 +1,22 @@
+[Unit]
+Description=MVX voice modulator daemon
+Documentation=https://github.com/x4yi/ModularVoiceX4yi
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mvxd
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+# Audio RT priority; the user must have rtprio limits configured.
+Nice=-10
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

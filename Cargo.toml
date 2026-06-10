@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/mvx-core",
+    "crates/mvx-ipc",
+    "crates/mvx-audio",
+    "crates/mvxd",
+    "crates/mvx-tui",
+    "crates/mvx-tray",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["x4yi"]
+repository = "https://github.com/x4yi/ModularVoiceX4yi"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+ksni = { version = "0.3", features = ["blocking"] }
+ratatui = "0.30"
+rtrb = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

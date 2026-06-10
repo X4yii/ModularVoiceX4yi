@@ -1,0 +1,7 @@
+/target
+**/*.log
+*.wav
+*.tmp
+.DS_Store
+.idea/
+.vscode/
