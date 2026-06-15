@@ -44,18 +44,29 @@ Binarios:
 - `target/release/mvxd` — daemon de audio.
 - `target/release/mvx` — cliente/TUI.
 - `target/release/mvx-tray` — icono de bandeja.
+- `mxv` — alias instalado de `mvx` para el lanzamiento de un solo comando.
 
 ## Ejecutar
 
-```bash
-# En una terminal
-./target/release/mvxd
+Después de instalar:
 
-# En otra
+```bash
+mxv
+```
+
+Ese único comando arranca el daemon si hace falta, inicia el tray (una sola
+instancia) y abre la TUI. Al cerrar la TUI con `q`, el daemon y el tray siguen
+vivos; la próxima `mxv` se reconecta. `mvx` hace exactamente lo mismo.
+
+Para desarrollo sin instalar:
+
+```bash
+./target/release/mvxd
 ./target/release/mvx tui
 ```
 
-`mvx tui` arranca `mvxd` automáticamente si no está corriendo y lo encuentra en `PATH` o junto al binario.
+`mvx tui` arranca `mvxd` y `mvx-tray` automáticamente si no están corriendo y
+los encuentra en `PATH` o junto al binario.
 
 En aplicaciones de voz (Discord, navegador, OBS, etc.) elegí **MVX Microphone** como micrófono. También podés verlo en `pavucontrol` → *Grabación* / *Dispositivos de entrada*.
 
@@ -73,10 +84,12 @@ En aplicaciones de voz (Discord, navegador, OBS, etc.) elegí **MVX Microphone**
 ## CLI
 
 ```bash
-mvx status      # snapshot JSON del daemon
-mvx devices     # entradas físicas detectadas
-mvx doctor      # diagnóstico de socket, formato, xruns, etc.
-mvx shutdown    # apagar el daemon
+mxv status      # snapshot JSON del daemon
+mxv devices     # entradas físicas detectadas
+mxv doctor      # diagnóstico de socket, formato, xruns, etc.
+mxv shutdown    # apagar el daemon
+
+# `mvx` es equivalente; ambos son el mismo binario.
 ```
 
 ## Tray
@@ -91,13 +104,19 @@ El menú permite abrir la TUI, alternar mute, abrir `pavucontrol`, apagar el dae
 
 ```bash
 ./scripts/install.sh
-systemctl --user daemon-reload
-systemctl --user enable --now mvxd.service
-# iniciar el tray en la sesión gráfica:
-systemctl --user enable --now mvx-tray.service
+mxv
 ```
 
-El script instala en `~/.local/bin`, los servicios en `~/.config/systemd/user` y el lanzador en `~/.local/share/applications`.
+El script instala en `~/.local/bin` (incluido el alias `mxv`), los servicios en
+`~/.config/systemd/user` y el lanzador en `~/.local/share/applications`.
+
+Opcional, para que daemon y tray sobrevivan reinicios de sesión:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now mvxd.service
+systemctl --user enable --now mvx-tray.service
+```
 
 ## Configuración
 

@@ -21,6 +21,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 ksni = { version = "0.3", features = ["blocking"] }
+libc = "0.2"
 ratatui = "0.30"
 rtrb = "0.4"
 serde = { version = "1", features = ["derive"] }

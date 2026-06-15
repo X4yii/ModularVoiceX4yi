@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -103,19 +103,33 @@ fn connect_or_start() -> Result<Client> {
 }
 
 fn start_daemon() -> Result<()> {
-    let me = std::env::current_exe().ok();
-    let candidate = me.as_ref().and_then(|p| p.parent()).map(|p| p.join("mvxd"));
-    let mut command = if let Some(path) = candidate.filter(|p| p.exists()) {
-        Command::new(path)
-    } else {
-        Command::new("mvxd")
-    };
-    let log_path = mvx_core::runtime_dir().join("mvxd.log");
+    let program = find_binary("mvxd")
+        .context("no se encontró mvxd; instalalo en PATH o iniciá el servicio systemd")?;
+    spawn_detached(&program, "mvxd.log").context("no se pudo iniciar mvxd")
+}
+
+fn start_tray() -> Result<()> {
+    let program = find_binary("mvx-tray").context("no se encontró el binario mvx-tray")?;
+    spawn_detached(&program, "mvx-tray.log").context("no se pudo iniciar mvx-tray")
+}
+
+/// Start a helper in its own session so closing the terminal does not kill it.
+fn spawn_detached(program: &Path, log_name: &str) -> Result<()> {
+    let _ = mvx_core::ensure_runtime_dir();
+    let log_path = mvx_core::runtime_dir().join(log_name);
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
         .ok();
+
+    let mut command = if Path::new("/usr/bin/setsid").exists() {
+        let mut command = Command::new("/usr/bin/setsid");
+        command.arg(program);
+        command
+    } else {
+        Command::new(program)
+    };
     command.stdin(Stdio::null());
     if let Some(log) = log {
         let log2 = log.try_clone().ok();
@@ -126,10 +140,29 @@ fn start_daemon() -> Result<()> {
     } else {
         command.stderr(Stdio::null()).stdout(Stdio::null());
     }
-    command
+
+    let mut child = command
         .spawn()
-        .context("no se pudo iniciar mvxd; instalalo en PATH o iniciá el servicio systemd")?;
+        .with_context(|| format!("no se pudo ejecutar {}", program.display()))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
+}
+
+fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(candidate) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|path| path.is_file())
+    {
+        return Some(candidate);
+    }
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn run_tui() -> Result<()> {
@@ -149,6 +182,7 @@ struct App {
     last_start: Instant,
     quit: bool,
     gain_edit: f32,
+    tray_checked: bool,
 }
 
 impl App {
@@ -162,6 +196,7 @@ impl App {
             last_start: Instant::now() - Duration::from_secs(10),
             quit: false,
             gain_edit: 0.0,
+            tray_checked: false,
         }
     }
 
@@ -206,10 +241,21 @@ impl App {
                 }
                 self.status = "conectado a mvxd".into();
                 self.client = Some(client);
+                self.ensure_tray();
             }
             Err(err) => {
                 self.status = format!("sin daemon: {err}");
             }
+        }
+    }
+
+    fn ensure_tray(&mut self) {
+        if self.tray_checked || self.client.is_none() {
+            return;
+        }
+        self.tray_checked = true;
+        if let Err(err) = start_tray() {
+            self.status = format!("tray no iniciado: {err}");
         }
     }
 

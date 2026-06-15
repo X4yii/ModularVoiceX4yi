@@ -11,5 +11,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 ksni.workspace = true
+libc.workspace = true
 mvx-core = { path = "../mvx-core" }
 mvx-ipc = { path = "../mvx-ipc" }
