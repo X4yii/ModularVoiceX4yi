@@ -3,13 +3,64 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+pub mod presets;
+
+pub use presets::{
+    builtin_presets, FilterConfig, Preset, PresetStore, SpeakerLockConfig, PRESETS_VERSION,
+    PRESET_ARDILLA, PRESET_GRAVE, PRESET_NATURAL,
+};
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 2;
 pub const SOCKET_NAME: &str = "mvxd.sock";
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    #[default]
+    Ultra,
+    Balanced,
+    High,
+}
+
+impl Quality {
+    pub fn block_size(self) -> usize {
+        match self {
+            Self::Ultra => 512,
+            Self::Balanced => 1024,
+            Self::High => 2048,
+        }
+    }
+
+    pub fn interval(self) -> usize {
+        self.block_size() / 4
+    }
+
+    pub fn latency_ms(self) -> f32 {
+        self.block_size() as f32 * 1000.0 / 48_000.0
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ultra => "Ultra",
+            Self::Balanced => "Equilibrado",
+            Self::High => "Alta",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label.to_lowercase().as_str() {
+            "balanced" | "equilibrado" => Self::Balanced,
+            "high" | "alta" | "calidad" => Self::High,
+            _ => Self::Ultra,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceInfo {
@@ -31,6 +82,8 @@ pub struct Snapshot {
     pub channels: u32,
     pub quantum: u32,
     pub latency_ms: f32,
+    pub dsp_latency_ms: f32,
+    pub total_latency_ms: f32,
     pub input_peak_db: f32,
     pub output_peak_db: f32,
     pub xruns: u64,
@@ -42,7 +95,24 @@ pub struct Snapshot {
     pub playback_frames: u64,
     pub ring_fill: u64,
     pub gain_db: f32,
+    pub preset_gain_db: f32,
     pub muted: bool,
+    pub active_preset: String,
+    pub active_preset_name: String,
+    pub presets: Vec<Preset>,
+    pub pitch_semitones: f32,
+    pub formant_semitones: f32,
+    pub quality: Quality,
+    pub noise_reduction_strength: Option<f32>,
+    pub speaker_lock_enabled: bool,
+    pub speaker_lock_available: bool,
+    pub speaker_lock_profile: String,
+    pub speaker_score: f32,
+    pub speaker_target: bool,
+    pub speaker_vad: bool,
+    pub speaker_status: String,
+    pub voice_profiles: Vec<String>,
+    pub models_installed: bool,
     pub devices: Vec<DeviceInfo>,
     pub error: Option<String>,
 }
@@ -57,8 +127,17 @@ impl Snapshot {
             channels: 2,
             quantum: 256,
             latency_ms: 0.0,
+            dsp_latency_ms: 0.0,
+            total_latency_ms: 0.0,
             input_peak_db: -120.0,
             output_peak_db: -120.0,
+            gain_db: 0.0,
+            preset_gain_db: 0.0,
+            active_preset: PRESET_NATURAL.to_string(),
+            active_preset_name: "Natural".to_string(),
+            quality: Quality::Ultra,
+            voice_profiles: Vec::new(),
+            speaker_status: "desactivado".to_string(),
             ..Self::default()
         }
     }
@@ -82,6 +161,35 @@ pub struct SharedState {
     capture_frames: AtomicU64,
     playback_frames: AtomicU64,
     ring_fill: AtomicU64,
+    speaker_vad: AtomicBool,
+    speaker_threshold: AtomicU32,
+    speaker_hold_ms: AtomicU32,
+    speaker_gate: SpeakerGate,
+}
+
+/// Atomics shared with the audio callback for the speaker gate.
+pub struct SpeakerGate {
+    pub enabled: Arc<AtomicBool>,
+    pub available: Arc<AtomicBool>,
+    pub target: Arc<AtomicBool>,
+    pub score: Arc<AtomicU32>,
+}
+
+impl SpeakerGate {
+    pub fn new() -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(false)),
+            available: Arc::new(AtomicBool::new(false)),
+            target: Arc::new(AtomicBool::new(false)),
+            score: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+        }
+    }
+}
+
+impl Default for SpeakerGate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedState {
@@ -93,6 +201,8 @@ impl SharedState {
         snap.gain_db = config.audio.gain_db;
         snap.muted = config.audio.mute;
         snap.selected_input = config.audio.input.clone();
+        snap.active_preset = config.presets.active.clone();
+        snap.quality = config.dsp.default_quality;
         Self {
             inner: RwLock::new(snap),
             input_peak: AtomicU32::new(0.0f32.to_bits()),
@@ -106,6 +216,10 @@ impl SharedState {
             capture_frames: AtomicU64::new(0),
             playback_frames: AtomicU64::new(0),
             ring_fill: AtomicU64::new(0),
+            speaker_vad: AtomicBool::new(false),
+            speaker_threshold: AtomicU32::new(0.72f32.to_bits()),
+            speaker_hold_ms: AtomicU32::new(300),
+            speaker_gate: SpeakerGate::new(),
         }
     }
 
@@ -123,10 +237,15 @@ impl SharedState {
         snap.capture_frames = self.capture_frames.load(Ordering::Relaxed);
         snap.playback_frames = self.playback_frames.load(Ordering::Relaxed);
         snap.ring_fill = self.ring_fill.load(Ordering::Relaxed);
+        snap.speaker_lock_available = self.speaker_gate.available.load(Ordering::Relaxed);
+        snap.speaker_target = self.speaker_gate.target.load(Ordering::Relaxed);
+        snap.speaker_vad = self.speaker_vad.load(Ordering::Relaxed);
+        snap.speaker_score = f32::from_bits(self.speaker_gate.score.load(Ordering::Relaxed));
         let channels = snap.channels.max(1) as u64;
         let rate = snap.sample_rate.max(1) as f32;
         let buffered_frames = snap.ring_fill / channels + snap.quantum as u64;
         snap.latency_ms = buffered_frames as f32 * 1000.0 / rate;
+        snap.total_latency_ms = snap.latency_ms + snap.dsp_latency_ms;
         snap
     }
 
@@ -158,11 +277,7 @@ impl SharedState {
     }
 
     pub fn set_error(&self, error: Option<String>) {
-        let has_error = error.is_some();
         self.update(|s| s.error = error);
-        if has_error {
-            self.running.store(false, Ordering::Relaxed);
-        }
     }
 
     pub fn set_gain(&self, gain_db: f32, muted: bool) {
@@ -176,7 +291,96 @@ impl SharedState {
         self.update(|s| {
             s.quantum = quantum;
             s.latency_ms = latency_ms;
+            s.total_latency_ms = latency_ms + s.dsp_latency_ms;
         });
+    }
+
+    pub fn set_dsp_latency(&self, latency_ms: f32) {
+        self.update(|s| {
+            s.dsp_latency_ms = latency_ms;
+            s.total_latency_ms = s.latency_ms + latency_ms;
+        });
+    }
+
+    pub fn set_preset_state(&self, preset: &Preset) {
+        self.update(|s| {
+            s.active_preset = preset.id.clone();
+            s.active_preset_name = preset.name.clone();
+            s.pitch_semitones = preset.pitch_semitones;
+            s.formant_semitones = preset.formant_semitones;
+            s.quality = preset.quality;
+            s.preset_gain_db = preset.gain_db();
+            s.noise_reduction_strength = preset.noise_reduction();
+            s.speaker_lock_enabled = preset.speaker_lock().is_some();
+            s.speaker_lock_profile = preset
+                .speaker_lock()
+                .map(|lock| lock.profile)
+                .unwrap_or_default();
+        });
+    }
+
+    pub fn set_presets(&self, presets: Vec<Preset>) {
+        self.update(|s| s.presets = presets);
+    }
+
+    pub fn set_active_preset_id(&self, id: String) {
+        self.update(|s| s.active_preset = id);
+    }
+
+    pub fn set_voice_profiles(&self, profiles: Vec<String>) {
+        self.update(|s| s.voice_profiles = profiles);
+    }
+
+    pub fn set_models_installed(&self, installed: bool) {
+        self.update(|s| s.models_installed = installed);
+    }
+
+    pub fn models_installed(&self) -> bool {
+        self.inner.read().expect("state poisoned").models_installed
+    }
+
+    pub fn set_speaker_status(&self, status: impl Into<String>) {
+        self.update(|s| s.speaker_status = status.into());
+    }
+
+    pub fn set_speaker_metrics(&self, score: f32, target: bool, vad: bool) {
+        self.speaker_gate
+            .score
+            .store(score.to_bits(), Ordering::Relaxed);
+        self.speaker_gate.target.store(target, Ordering::Relaxed);
+        self.speaker_vad.store(vad, Ordering::Relaxed);
+    }
+
+    pub fn set_speaker_config(&self, threshold: f32, hold_ms: u32) {
+        self.speaker_threshold
+            .store(threshold.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.speaker_hold_ms
+            .store(hold_ms.min(5_000), Ordering::Relaxed);
+    }
+
+    pub fn speaker_config(&self) -> (f32, u32) {
+        (
+            f32::from_bits(self.speaker_threshold.load(Ordering::Relaxed)),
+            self.speaker_hold_ms.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn set_speaker_enabled(&self, enabled: bool, available: bool) {
+        self.speaker_gate
+            .enabled
+            .store(enabled && available, Ordering::Relaxed);
+        self.speaker_gate
+            .available
+            .store(available, Ordering::Relaxed);
+    }
+
+    pub fn speaker_gate(&self) -> SpeakerGate {
+        SpeakerGate {
+            enabled: self.speaker_gate.enabled.clone(),
+            available: self.speaker_gate.available.clone(),
+            target: self.speaker_gate.target.clone(),
+            score: self.speaker_gate.score.clone(),
+        }
     }
 
     pub fn set_peak(&self, input: f32) {
@@ -227,13 +431,25 @@ pub fn linear_to_db(v: f32) -> f32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub config_version: u32,
+    #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub dsp: DspConfig,
+    #[serde(default)]
+    pub presets: PresetConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CONFIG_VERSION,
             audio: AudioConfig::default(),
+            dsp: DspConfig::default(),
+            presets: PresetConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -247,6 +463,7 @@ pub struct AudioConfig {
     pub sample_rate: u32,
     #[serde(default = "default_quantum")]
     pub quantum: u32,
+    /// Master trim, applied after the preset gain.
     #[serde(default)]
     pub gain_db: f32,
     #[serde(default)]
@@ -271,6 +488,62 @@ impl Default for AudioConfig {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DspConfig {
+    #[serde(default)]
+    pub default_quality: Quality,
+    /// Optional override for the speaker embedding ONNX model.
+    #[serde(default)]
+    pub speaker_model: Option<String>,
+    /// Optional override for the Silero VAD ONNX model.
+    #[serde(default)]
+    pub vad_model: Option<String>,
+    #[serde(default = "default_analysis_hz")]
+    pub speaker_analysis_hz: u32,
+}
+
+impl Default for DspConfig {
+    fn default() -> Self {
+        Self {
+            default_quality: Quality::Ultra,
+            speaker_model: None,
+            vad_model: None,
+            speaker_analysis_hz: 4,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresetConfig {
+    #[serde(default = "default_active_preset")]
+    pub active: String,
+}
+
+impl Default for PresetConfig {
+    fn default() -> Self {
+        Self {
+            active: default_active_preset(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_true_ui")]
+    pub mouse: bool,
+    #[serde(default = "default_tab")]
+    pub last_tab: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            mouse: true,
+            last_tab: default_tab(),
+        }
+    }
+}
+
 fn default_sample_rate() -> u32 {
     48_000
 }
@@ -283,13 +556,30 @@ fn default_virtual_name() -> String {
 fn default_virtual_desc() -> String {
     "MVX Microphone".to_string()
 }
+fn default_analysis_hz() -> u32 {
+    4
+}
+fn default_active_preset() -> String {
+    PRESET_NATURAL.to_string()
+}
+fn default_true_ui() -> bool {
+    true
+}
+fn default_tab() -> String {
+    "general".to_string()
+}
 
 impl Config {
     pub fn load() -> Self {
         let path = config_path();
         match fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
-                Ok(config) => config,
+                Ok(mut config) => {
+                    if config.config_version == 0 {
+                        config.config_version = CONFIG_VERSION;
+                    }
+                    config
+                }
                 Err(err) => {
                     eprintln!("mvx: no se pudo parsear {}: {err}", path.display());
                     Config::default()
@@ -304,7 +594,10 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, toml::to_string_pretty(self)?)?;
+        let text = toml::to_string_pretty(self)?;
+        let tmp = path.with_extension("toml.tmp");
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, &path)?;
         Ok(())
     }
 }
@@ -317,6 +610,10 @@ pub fn config_dir() -> PathBuf {
 
 pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
+}
+
+pub fn presets_path() -> PathBuf {
+    config_dir().join("presets.toml")
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -351,6 +648,41 @@ pub fn state_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "mvx")
         .and_then(|d| d.state_dir().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from(".").join(".local/state/mvx"))
+}
+
+pub fn models_dir() -> PathBuf {
+    data_dir().join("models")
+}
+
+pub fn speaker_model_path() -> PathBuf {
+    models_dir().join("3dspeaker_campplus_zh_en.onnx")
+}
+
+pub fn vad_model_path() -> PathBuf {
+    models_dir().join("silero_vad.onnx")
+}
+
+pub fn voices_dir() -> PathBuf {
+    data_dir().join("voices")
+}
+
+pub fn profile_path(name: &str) -> PathBuf {
+    voices_dir().join(format!("{name}.json"))
+}
+
+pub fn list_voice_profiles() -> Vec<String> {
+    let mut profiles = Vec::new();
+    if let Ok(entries) = fs::read_dir(voices_dir()) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(name) = name.strip_suffix(".json") {
+                    profiles.push(name.to_string());
+                }
+            }
+        }
+    }
+    profiles.sort();
+    profiles
 }
 
 pub fn maybe_remove_stale_socket(path: &Path) {

@@ -1,7 +1,7 @@
 use std::io::BufReader;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -54,6 +54,7 @@ fn main() -> Result<()> {
     let sender = engine.sender();
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let installing_models = Arc::new(AtomicBool::new(false));
     let socket_guard = if args.no_ipc {
         None
     } else {
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
         let sender_ipc = sender.clone();
         let shared_ipc = shared.clone();
         let shutdown_ipc = shutdown.clone();
+        let installing_ipc = installing_models.clone();
         thread::Builder::new()
             .name("mvx-ipc".into())
             .spawn(move || {
@@ -81,13 +83,14 @@ fn main() -> Result<()> {
                             let sender = sender_ipc.clone();
                             let shared = shared_ipc.clone();
                             let shutdown = shutdown_ipc.clone();
+                            let installing = installing_ipc.clone();
                             let _ =
                                 thread::Builder::new()
                                     .name("mvx-client".into())
                                     .spawn(move || {
-                                        if let Err(err) =
-                                            handle_client(stream, sender, shared, shutdown)
-                                        {
+                                        if let Err(err) = handle_client(
+                                            stream, sender, shared, shutdown, installing,
+                                        ) {
                                             warn!("cliente IPC: {err:#}");
                                         }
                                     });
@@ -125,6 +128,7 @@ fn handle_client(
     sender: CommandSender,
     shared: Arc<SharedState>,
     shutdown: Arc<AtomicBool>,
+    installing_models: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -158,6 +162,44 @@ fn handle_client(
                 Ok(()) => Response::Ok,
                 Err(_) => Response::error("el motor de audio no está disponible"),
             },
+            Request::ApplyPreset { id } => match sender.send(AudioCommand::ApplyPreset { id }) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::UpsertPreset { preset, activate } => {
+                match sender.send(AudioCommand::UpsertPreset { preset, activate }) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::DeletePreset { id } => match sender.send(AudioCommand::DeletePreset { id }) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::ResetPreset { id } => match sender.send(AudioCommand::ResetPreset { id }) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::EnrollVoice { name, seconds } => {
+                match sender.send(AudioCommand::EnrollVoice { name, seconds }) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::DeleteVoice { name } => {
+                match sender.send(AudioCommand::DeleteVoice { name }) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::InstallModels => {
+                if installing_models.swap(true, Ordering::Relaxed) {
+                    Response::error("la descarga de modelos ya está en curso")
+                } else {
+                    spawn_model_install(shared.clone(), installing_models.clone(), sender.clone());
+                    Response::Ok
+                }
+            }
             Request::Ping => Response::Pong,
             Request::Shutdown => {
                 let _ = sender.send(AudioCommand::Shutdown);
@@ -166,6 +208,80 @@ fn handle_client(
             }
         };
         write_response(&mut writer, &response)?;
+    }
+    Ok(())
+}
+
+fn spawn_model_install(shared: Arc<SharedState>, busy: Arc<AtomicBool>, sender: CommandSender) {
+    thread::Builder::new()
+        .name("mvx-model-download".into())
+        .spawn(move || {
+            shared.set_speaker_status("descargando modelos de voz…");
+            let result = install_models();
+            busy.store(false, Ordering::Relaxed);
+            match result {
+                Ok(()) => {
+                    shared.set_models_installed(true);
+                    shared.set_speaker_status("modelos de voz instalados");
+                    // If Solo mi voz was enabled while the models were absent,
+                    // the speaker worker could not start. Rebuild now that the
+                    // files are available.
+                    let _ = sender.send(AudioCommand::ReloadAudio);
+                }
+                Err(err) => {
+                    shared.set_models_installed(false);
+                    shared.set_speaker_status(format!("error al descargar modelos: {err}"));
+                    shared.set_error(Some(format!("modelos de voz: {err}")));
+                }
+            }
+        })
+        .ok();
+}
+
+fn install_models() -> Result<()> {
+    let dir = mvx_core::models_dir();
+    std::fs::create_dir_all(&dir)?;
+    let downloads = [
+        (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+            mvx_core::speaker_model_path(),
+        ),
+        (
+            "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx",
+            mvx_core::vad_model_path(),
+        ),
+    ];
+    for (url, dest) in downloads {
+        if dest.exists() {
+            continue;
+        }
+        let part = dest.with_extension("onnx.part");
+        info!("descargando {} -> {}", url, dest.display());
+        download(url, &part)?;
+        std::fs::rename(&part, &dest)?;
+    }
+    Ok(())
+}
+
+fn download(url: &str, dest: &Path) -> Result<()> {
+    let status = std::process::Command::new("curl")
+        .args([
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "20",
+            "-o",
+        ])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .context("no se pudo ejecutar curl (¿está instalado?)")?;
+    if !status.success() {
+        anyhow::bail!("curl terminó con {status}");
     }
     Ok(())
 }

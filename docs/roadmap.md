@@ -1,6 +1,6 @@
 # Roadmap
 
-## M0 — Base PipeWire (actual)
+## M0 — Base PipeWire ✅
 
 - [x] Fuente virtual nativa y enlace manual.
 - [x] Daemon IPC y reconexión de clientes.
@@ -8,27 +8,40 @@
 - [x] Gain/mute persistidos.
 - [x] systemd de usuario.
 
-## M1 — DSP modular
+## M1 — DSP modular ✅
 
-- [ ] Trait `DspNode` con `prepare`, `process`, `reset`.
-- [ ] Cadena ordered con parámetros suavizados.
-- [ ] High-pass 20–300 Hz.
-- [ ] Noise gate con threshold/ratio/attack/release.
-- [ ] EQ paramétrico de 3–5 bandas.
-- [ ] Compresor y limiter.
-- [ ] Presets TOML y A/B.
-- [ ] Medición de reducción de ganancia.
+- [x] Presets TOML separados de `config.toml`.
+- [x] Built-in `Natural`, `Voz grave`, `Voz de ardilla`, editables y restaurables.
+- [x] Presets personalizados.
+- [x] Pitch/formantes independientes con Signalsmith Stretch.
+- [x] Calidad DSP (Ultra / Equilibrado / Alta).
+- [x] RNNoise opcional con intensidad.
+- [x] Ganancia maestra + ganancia por preset.
+- [x] Limitador de seguridad.
+- [x] TUI con ratón, sliders, modales y teclado físico.
 
-## M2 — Voz
+## M2 — Identidad de voz ✅
 
-- [ ] RNNoise (nnnoiseless) con VAD.
-- [ ] Pitch/formant sin destruir formantes.
-- [ ] De-esser.
-- [ ] Monitor de voz opcional (solo para auriculares).
+- [x] Modelos CAM++ y Silero VAD descargables desde la TUI/CLI.
+- [x] Worker de hablante fuera del hilo RT.
+- [x] Resampling 48k→16k, VAD y embeddings.
+- [x] Perfiles de voz persistentes.
+- [x] Enrolamiento guiado.
+- [x] `Solo mi voz` por preset con umbral, hold y lookahead.
+- [x] Score/VAD/estado visibles en la TUI.
 
-## M3 — Clonación neuronal
+## M3 — Separación y contenido
 
-- [ ] Pipeline de análisis de muestras objetivo.
-- [ ] Embeddings de timbre.
-- [ ] Conversión voz-a-voz con modelo local.
-- [ ] Control de similitud vs. inteligibilidad.
+- [ ] Separación real de voces solapadas (no solo compuerta).
+- [ ] Supresión de palabras/nombres concretos con KWS/audio tagging.
+- [ ] Detección de tipos de sonido (ladridos, llaves, etc.).
+- [ ] Clonación neuronal de timbre.
+- [ ] Conversión voz-a-voz local con control de similitud.
+
+## M4 — Producto
+
+- [ ] Resampler adaptativo para deriva de reloj.
+- [ ] Medición real de latencia E2E.
+- [ ] Grabación y análisis de muestras.
+- [ ] Ajuste automático opcional.
+- [ ] Empaquetado para más distribuciones.

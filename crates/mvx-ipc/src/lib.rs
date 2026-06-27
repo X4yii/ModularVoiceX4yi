@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use mvx_core::{Snapshot, PROTOCOL_VERSION, VERSION};
+use mvx_core::{Preset, Snapshot, PROTOCOL_VERSION, VERSION};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -16,12 +16,20 @@ pub enum Request {
     SetInput { name: String },
     SetGain { gain_db: f32 },
     SetMute { mute: bool },
+    ApplyPreset { id: String },
+    UpsertPreset { preset: Preset, activate: bool },
+    DeletePreset { id: String },
+    ResetPreset { id: String },
+    EnrollVoice { name: String, seconds: u32 },
+    DeleteVoice { name: String },
+    InstallModels,
     Ping,
     Shutdown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Hello { version: String, protocol: u32 },
     State { state: Snapshot },

@@ -31,7 +31,8 @@ cat <<'MSG'
 
 Instalado.
 
-  mxv          # TUI + daemon + tray (también disponible como `mvx`)
+  mxv                 # TUI + daemon + tray (también disponible como `mvx`)
+  mxv models install  # descarga CAM++ y Silero VAD (~30 MB)
   mxv doctor
   mxv status
 

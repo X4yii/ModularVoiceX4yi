@@ -6,7 +6,13 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
 mvx-core = { path = "../mvx-core" }
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nnnoiseless.workspace = true
+sherpa-onnx.workspace = true
+signalsmith-stretch.workspace = true
 tracing.workspace = true

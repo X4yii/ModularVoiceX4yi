@@ -17,7 +17,10 @@ use pw::spa::pod::Pod;
 use rtrb::{Consumer, Producer, RingBuffer};
 use tracing::{debug, warn};
 
-use mvx_core::{Config, DeviceInfo, SharedState};
+use mvx_core::{Config, DeviceInfo, Preset, PresetStore, SharedState};
+
+use crate::dsp::{DspChain, DspParams};
+use crate::speaker::SpeakerWorker;
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
@@ -29,6 +32,13 @@ pub enum AudioCommand {
     SetInput(String),
     SetGain(f32),
     SetMute(bool),
+    ApplyPreset { id: String },
+    UpsertPreset { preset: Preset, activate: bool },
+    DeletePreset { id: String },
+    ResetPreset { id: String },
+    EnrollVoice { name: String, seconds: u32 },
+    DeleteVoice { name: String },
+    ReloadAudio,
     Rescan,
     Tick,
     Shutdown,
@@ -132,8 +142,15 @@ struct Engine {
     ports: Rc<RefCell<HashMap<u32, PortMeta>>>,
     dirty: Rc<Cell<bool>>,
     selected_input: Option<String>,
+    presets: PresetStore,
+    active_preset: Preset,
+    master_gain_db: f32,
     gain: Arc<AtomicU32>,
     mute: Arc<AtomicBool>,
+    pitch_control: Arc<AtomicU32>,
+    formant_control: Arc<AtomicU32>,
+    noise_strength: Arc<AtomicU32>,
+    speaker: Option<SpeakerWorker>,
     last_retry: Instant,
     link_warned: bool,
 }
@@ -169,8 +186,10 @@ struct Playback {
 struct CaptureData {
     producer: Producer<f32>,
     channels: usize,
-    gain: Arc<AtomicU32>,
-    mute: Arc<AtomicBool>,
+    dsp: DspChain,
+    mono: Vec<f32>,
+    processed: Vec<f32>,
+    speaker: Option<Producer<f32>>,
     shared: Arc<SharedState>,
 }
 
@@ -272,9 +291,27 @@ impl Engine {
             config.audio.quantum,
         )?;
 
-        let gain_db = config.audio.gain_db;
-        let gain = Arc::new(AtomicU32::new(gain_db.to_bits()));
+        let mut presets = PresetStore::load();
+        presets.ensure_builtins();
+        let active_preset = presets
+            .active(&config.presets.active)
+            .cloned()
+            .unwrap_or_else(|| presets.presets[0].clone());
+        let _ = presets.save();
+
+        let master_gain_db = config.audio.gain_db;
+        let preset_gain_db = active_preset.gain_db();
+        let total_gain_db = master_gain_db + preset_gain_db;
+        let gain = Arc::new(AtomicU32::new(total_gain_db.to_bits()));
         let mute = Arc::new(AtomicBool::new(config.audio.mute));
+        let pitch_control = Arc::new(AtomicU32::new(active_preset.pitch_semitones.to_bits()));
+        let formant_control = Arc::new(AtomicU32::new(active_preset.formant_semitones.to_bits()));
+        let noise_strength = Arc::new(AtomicU32::new(
+            active_preset
+                .noise_reduction()
+                .unwrap_or(mvx_core::presets::DEFAULT_NOISE_STRENGTH)
+                .to_bits(),
+        ));
 
         let mut engine = Self {
             capture: None,
@@ -294,12 +331,27 @@ impl Engine {
             ports,
             dirty,
             selected_input: None,
+            presets,
+            active_preset,
+            master_gain_db,
             gain,
             mute,
+            pitch_control,
+            formant_control,
+            noise_strength,
+            speaker: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
         };
 
+        engine.shared.set_presets(engine.presets.presets.clone());
+        engine.shared.set_preset_state(&engine.active_preset);
+        engine
+            .shared
+            .set_voice_profiles(mvx_core::list_voice_profiles());
+        engine.shared.set_models_installed(
+            mvx_core::speaker_model_path().exists() && mvx_core::vad_model_path().exists(),
+        );
         engine.refresh_devices();
         engine.selected_input = engine
             .config
@@ -358,6 +410,68 @@ impl Engine {
         self.shared.set_latency(quantum, latency_ms);
     }
 
+    fn update_gain_atomic(&self) {
+        let preset_gain = self.active_preset.gain_db();
+        let total = (self.master_gain_db + preset_gain).clamp(-72.0, 36.0);
+        self.gain.store(total.to_bits(), Ordering::Relaxed);
+        self.shared
+            .set_gain(self.master_gain_db, self.mute.load(Ordering::Relaxed));
+    }
+
+    fn needs_rebuild(&self, next: &Preset) -> bool {
+        let old = &self.active_preset;
+        let old_stretch = old.pitch_semitones.abs() > 0.001 || old.formant_semitones.abs() > 0.001;
+        let new_stretch =
+            next.pitch_semitones.abs() > 0.001 || next.formant_semitones.abs() > 0.001;
+        old_stretch != new_stretch
+            || old.quality != next.quality
+            || old.noise_reduction().is_some() != next.noise_reduction().is_some()
+            || old.speaker_lock().is_some() != next.speaker_lock().is_some()
+            || old
+                .speaker_lock()
+                .zip(next.speaker_lock())
+                .map(|(a, b)| a.profile != b.profile || a.lookahead_ms != b.lookahead_ms)
+                .unwrap_or(false)
+    }
+
+    fn apply_preset(&mut self, mut preset: Preset, rebuild: bool) -> Result<()> {
+        preset.normalize();
+        let rebuild = rebuild || self.needs_rebuild(&preset);
+        self.active_preset = preset.clone();
+        self.config.presets.active = preset.id.clone();
+        if let Err(err) = self.config.save() {
+            debug!("no se pudo guardar el preset activo: {err}");
+        }
+        self.shared.set_preset_state(&preset);
+        self.shared.set_presets(self.presets.presets.clone());
+        self.pitch_control
+            .store(preset.pitch_semitones.to_bits(), Ordering::Relaxed);
+        self.formant_control
+            .store(preset.formant_semitones.to_bits(), Ordering::Relaxed);
+        self.noise_strength.store(
+            preset
+                .noise_reduction()
+                .unwrap_or(mvx_core::presets::DEFAULT_NOISE_STRENGTH)
+                .to_bits(),
+            Ordering::Relaxed,
+        );
+        if let Some(lock) = preset.speaker_lock() {
+            self.shared.set_speaker_config(lock.threshold, lock.hold_ms);
+        }
+        self.update_gain_atomic();
+        if rebuild {
+            self.rebuild_audio_path()?;
+        }
+        Ok(())
+    }
+
+    fn save_presets(&self) {
+        if let Err(err) = self.presets.save() {
+            self.shared
+                .set_error(Some(format!("no se pudo guardar presets.toml: {err}")));
+        }
+    }
+
     fn handle_command(&mut self, command: AudioCommand) {
         match command {
             AudioCommand::SetInput(name) => {
@@ -381,19 +495,148 @@ impl Engine {
                 }
             }
             AudioCommand::SetGain(gain_db) => {
-                let gain_db = gain_db.clamp(-60.0, 24.0);
-                self.gain.store(gain_db.to_bits(), Ordering::Relaxed);
-                self.config.audio.gain_db = gain_db;
+                self.master_gain_db = gain_db.clamp(-60.0, 24.0);
+                self.config.audio.gain_db = self.master_gain_db;
+                self.update_gain_atomic();
                 let _ = self.config.save();
-                self.shared
-                    .set_gain(gain_db, self.mute.load(Ordering::Relaxed));
             }
             AudioCommand::SetMute(mute) => {
                 self.mute.store(mute, Ordering::Relaxed);
                 self.config.audio.mute = mute;
                 let _ = self.config.save();
-                self.shared
-                    .set_gain(f32::from_bits(self.gain.load(Ordering::Relaxed)), mute);
+                self.update_gain_atomic();
+            }
+            AudioCommand::ApplyPreset { id } => {
+                let Some(preset) = self.presets.find(&id).cloned() else {
+                    self.shared
+                        .set_error(Some(format!("no existe el preset {id}")));
+                    return;
+                };
+                if let Err(err) = self.apply_preset(preset, true) {
+                    self.shared
+                        .set_error(Some(format!("no se pudo aplicar el preset: {err}")));
+                }
+            }
+            AudioCommand::UpsertPreset { preset, activate } => {
+                if let Err(err) = self.presets.upsert(preset.clone()) {
+                    self.shared
+                        .set_error(Some(format!("preset inválido: {err}")));
+                    return;
+                }
+                self.save_presets();
+                self.shared.set_presets(self.presets.presets.clone());
+                if activate {
+                    let stored = self.presets.find(&preset.id).cloned().unwrap_or(preset);
+                    if let Err(err) = self.apply_preset(stored, false) {
+                        self.shared
+                            .set_error(Some(format!("no se pudo aplicar el preset: {err}")));
+                    }
+                }
+            }
+            AudioCommand::DeletePreset { id } => match self.presets.remove(&id) {
+                Ok(true) => {
+                    self.save_presets();
+                    self.shared.set_presets(self.presets.presets.clone());
+                    if self.active_preset.id == id {
+                        let natural = self
+                            .presets
+                            .find(mvx_core::PRESET_NATURAL)
+                            .cloned()
+                            .unwrap_or_else(|| self.presets.presets[0].clone());
+                        let _ = self.apply_preset(natural, true);
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => self.shared.set_error(Some(err.to_string())),
+            },
+            AudioCommand::ResetPreset { id } => match self.presets.reset_builtin(&id) {
+                Ok(true) => {
+                    self.save_presets();
+                    self.shared.set_presets(self.presets.presets.clone());
+                    if self.active_preset.id == id {
+                        if let Some(preset) = self.presets.find(&id).cloned() {
+                            let _ = self.apply_preset(preset, true);
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => self.shared.set_error(Some(err.to_string())),
+            },
+            AudioCommand::EnrollVoice { name, seconds } => {
+                if let Some(speaker) = &self.speaker {
+                    speaker.request_enrollment(name.clone(), seconds);
+                    self.shared
+                        .set_speaker_status(format!("enrolando «{name}» durante {seconds}s"));
+                } else if !self.shared.models_installed() {
+                    self.shared.set_speaker_status(
+                        "instalá los modelos de voz antes de enrolar un perfil",
+                    );
+                } else if self.active_preset.speaker_lock().is_none() {
+                    self.shared
+                        .set_speaker_status("activá «Solo mi voz» antes de enrolar un perfil");
+                } else {
+                    self.shared
+                        .set_speaker_status("no se pudo iniciar el analizador de voz");
+                }
+            }
+            AudioCommand::DeleteVoice { name } => {
+                let path = mvx_core::profile_path(&name);
+                match std::fs::remove_file(path) {
+                    Ok(()) => {
+                        self.shared
+                            .set_voice_profiles(mvx_core::list_voice_profiles());
+                        self.shared
+                            .set_speaker_status(format!("voz {name} eliminada"));
+                        let active_has_lock = self.active_preset.speaker_lock().is_some();
+                        let mut changed = false;
+                        if let Some(mut preset) = self.presets.find(&self.active_preset.id).cloned()
+                        {
+                            for filter in &mut preset.filters {
+                                if let mvx_core::presets::FilterConfig::SpeakerLock {
+                                    profile,
+                                    ..
+                                } = filter
+                                {
+                                    if profile == &name {
+                                        profile.clear();
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            if changed {
+                                let _ = self.presets.upsert(preset.clone());
+                                self.save_presets();
+                            }
+                        }
+                        // Even if the preset did not reference the profile (for
+                        // example when enrollment came from a client that did
+                        // not update the preset), the worker may have it loaded
+                        // in memory. Restarting the speaker preset drops it.
+                        if changed || active_has_lock {
+                            if let Some(preset) = self.presets.find(&self.active_preset.id).cloned()
+                            {
+                                if let Err(err) = self.apply_preset(preset, true) {
+                                    self.shared.set_error(Some(format!(
+                                        "no se pudo recargar el perfil de voz: {err}"
+                                    )));
+                                }
+                            } else if let Err(err) = self.rebuild_audio_path() {
+                                self.shared.set_error(Some(format!(
+                                    "no se pudo recargar el perfil de voz: {err}"
+                                )));
+                            }
+                        }
+                    }
+                    Err(err) => self
+                        .shared
+                        .set_error(Some(format!("no se pudo borrar la voz {name}: {err}"))),
+                }
+            }
+            AudioCommand::ReloadAudio => {
+                if let Err(err) = self.rebuild_audio_path() {
+                    self.shared
+                        .set_error(Some(format!("no se pudo recargar el audio: {err}")));
+                }
             }
             AudioCommand::Rescan => {
                 self.dirty.set(true);
@@ -453,15 +696,49 @@ impl Engine {
     fn rebuild_audio_path(&mut self) -> Result<()> {
         self.capture = None;
         self.playback = None;
+        self.speaker = None;
         self.links.clear();
         self.linked_ports.clear();
         self.link_warned = false;
         self.shared.set_running(false);
+        self.shared.set_speaker_enabled(false, false);
         self.last_retry = Instant::now();
+
+        let speaker_producer = if let Some(lock) = self.active_preset.speaker_lock() {
+            let model = self
+                .config
+                .dsp
+                .speaker_model
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(mvx_core::speaker_model_path);
+            let vad = self
+                .config
+                .dsp
+                .vad_model
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(mvx_core::vad_model_path);
+            self.shared.set_speaker_config(lock.threshold, lock.hold_ms);
+            let start = SpeakerWorker::start(
+                self.shared.clone(),
+                lock.profile,
+                model,
+                vad,
+                self.config.dsp.speaker_analysis_hz,
+            );
+            self.speaker = start.worker;
+            start.producer
+        } else {
+            self.shared.set_speaker_enabled(false, false);
+            self.shared.set_speaker_metrics(0.0, false, false);
+            self.shared.set_speaker_status("desactivado");
+            None
+        };
 
         let (producer, consumer) = RingBuffer::new(RING_CAPACITY);
         self.playback = Some(self.create_playback(consumer)?);
-        self.capture = Some(self.create_capture(producer)?);
+        self.capture = Some(self.create_capture(producer, speaker_producer)?);
         Ok(())
     }
 
@@ -481,16 +758,46 @@ impl Engine {
         props
     }
 
-    fn create_capture(&self, producer: Producer<f32>) -> Result<Capture> {
+    fn create_capture(
+        &self,
+        producer: Producer<f32>,
+        speaker: Option<Producer<f32>>,
+    ) -> Result<Capture> {
         let stream =
             pw::stream::StreamRc::new(self.core.clone(), "mvx-capture", self.capture_props())
                 .context("no se pudo crear el stream de captura")?;
 
+        let lock = self.active_preset.speaker_lock();
+        let dsp = DspChain::new(DspParams {
+            pitch_semitones: self.active_preset.pitch_semitones,
+            formant_semitones: self.active_preset.formant_semitones,
+            quality: self.active_preset.quality,
+            noise_reduction: self.active_preset.noise_reduction(),
+            speaker_gate: lock.as_ref().map(|_| self.shared.speaker_gate()),
+            speaker_lookahead_ms: lock.as_ref().map(|l| l.lookahead_ms).unwrap_or(0),
+            gain_db: self.gain.clone(),
+            mute: self.mute.clone(),
+            pitch_control: self.pitch_control.clone(),
+            formant_control: self.formant_control.clone(),
+            noise_strength: self.noise_strength.clone(),
+        })?;
+        self.shared.set_dsp_latency(dsp.latency_ms());
+        if lock.is_some() {
+            self.shared.set_speaker_enabled(false, false);
+            self.shared
+                .set_speaker_status("esperando modelo de voz y perfil");
+        } else {
+            self.shared.set_speaker_enabled(false, false);
+            self.shared.set_speaker_status("desactivado");
+        }
+
         let data = CaptureData {
             producer,
             channels: CHANNELS as usize,
-            gain: self.gain.clone(),
-            mute: self.mute.clone(),
+            dsp,
+            mono: vec![0.0; 8_192],
+            processed: vec![0.0; 8_192],
+            speaker,
             shared: self.shared.clone(),
         };
 
@@ -558,36 +865,49 @@ impl Engine {
                 }
                 let frames = (end - offset) / frame_bytes;
                 data.shared.inc_capture_block(frames);
-                let gain_db = f32::from_bits(data.gain.load(Ordering::Relaxed));
-                let gain = if data.mute.load(Ordering::Relaxed) {
-                    0.0
-                } else {
-                    10f32.powf(gain_db / 20.0)
-                };
+
                 let mut peak = 0.0f32;
-                for frame in 0..frames {
-                    let base = offset + frame * frame_bytes;
-                    let mut mono = 0.0f32;
-                    for ch in 0..channels {
-                        let start = base + ch * 4;
-                        let sample = f32::from_le_bytes([
-                            slice[start],
-                            slice[start + 1],
-                            slice[start + 2],
-                            slice[start + 3],
-                        ]);
-                        mono += sample;
+                let mut done = 0usize;
+                let capacity = data.mono.len();
+                'chunks: while done < frames {
+                    let chunk_frames = (frames - done).min(capacity);
+                    for index in 0..chunk_frames {
+                        let base = offset + (done + index) * frame_bytes;
+                        let mut mono = 0.0f32;
+                        for ch in 0..channels {
+                            let start = base + ch * 4;
+                            let sample = f32::from_le_bytes([
+                                slice[start],
+                                slice[start + 1],
+                                slice[start + 2],
+                                slice[start + 3],
+                            ]);
+                            mono += sample;
+                        }
+                        mono /= channels as f32;
+                        peak = peak.max(mono.abs());
+                        data.mono[index] = mono;
+                        if let Some(speaker) = data.speaker.as_mut() {
+                            let _ = speaker.push(mono);
+                        }
                     }
-                    mono = (mono / channels as f32) * gain;
-                    peak = peak.max(mono.abs());
-                    if data.producer.push(mono).is_err() {
-                        data.shared.inc_overflow();
-                        break;
+
+                    data.dsp.process(
+                        &data.mono[..chunk_frames],
+                        &mut data.processed[..chunk_frames],
+                    );
+
+                    for sample in &data.processed[..chunk_frames] {
+                        if data.producer.push(*sample).is_err() {
+                            data.shared.inc_overflow();
+                            break 'chunks;
+                        }
+                        if data.producer.push(*sample).is_err() {
+                            data.shared.inc_overflow();
+                            break 'chunks;
+                        }
                     }
-                    if data.producer.push(mono).is_err() {
-                        data.shared.inc_overflow();
-                        break;
-                    }
+                    done += chunk_frames;
                 }
                 data.shared.set_peak(peak);
             })
@@ -779,7 +1099,7 @@ impl Engine {
             let candidate = ins
                 .iter()
                 .find(|p| p.channel.is_some() && p.channel == out.channel)
-                .or_else(|| ins.get(0));
+                .or_else(|| ins.first());
             let Some(input) = candidate else { continue };
             if !self.linked_ports.insert((out.id, input.id)) {
                 continue;

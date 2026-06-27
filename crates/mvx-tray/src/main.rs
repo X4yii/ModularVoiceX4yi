@@ -70,6 +70,7 @@ fn acquire_instance_lock() -> Result<Option<InstanceLock>> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(&path)
         .with_context(|| format!("no se pudo abrir {}", path.display()))?;
@@ -166,9 +167,11 @@ impl Tray for MvxTray {
             icon_pixmap: Vec::new(),
             title: "MVX · ModularVoiceX4yi".into(),
             description: format!(
-                "{}<br/>{}<br/>{} Hz · quantum {}",
+                "{}<br/>{}<br/>preset: {} · {:.1} ms<br/>{} Hz · quantum {}",
                 self.status_text(),
                 self.input_text(),
+                self.state.active_preset_name,
+                self.state.total_latency_ms,
                 self.state.sample_rate,
                 self.state.quantum
             ),
@@ -204,9 +207,15 @@ impl Tray for MvxTray {
             }
             .into(),
             StandardItem {
+                label: format!("Preset: {}", self.state.active_preset_name),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: format!(
-                    "{} Hz · quantum {} · {:.1} ms est.",
-                    self.state.sample_rate, self.state.quantum, self.state.latency_ms
+                    "{} Hz · quantum {} · {:.1} ms total",
+                    self.state.sample_rate, self.state.quantum, self.state.total_latency_ms
                 ),
                 enabled: false,
                 ..Default::default()

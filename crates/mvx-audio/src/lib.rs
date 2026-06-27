@@ -1,7 +1,9 @@
 //! Native PipeWire backend for MVX.
 //!
-//! M0 scope: microphone capture, native virtual source, playback bridge, gain/mute.
+//! Microphone capture, the voice-processing chain, and the native virtual source.
 
+mod dsp;
 mod engine;
+mod speaker;
 
 pub use engine::{AudioCommand, AudioEngine, CommandSender};
