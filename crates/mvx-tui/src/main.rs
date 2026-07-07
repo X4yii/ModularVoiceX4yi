@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEvent, MouseEventKind,
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+    KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -187,11 +187,31 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 fn run_tui() -> Result<()> {
     let mut app = App::new();
     let mut terminal = ratatui::init();
-    let _ = execute!(io::stdout(), EnableMouseCapture);
+    match enable_mouse_capture() {
+        Ok(()) => {
+            app.mouse_active = true;
+            app.status = "ratón listo: clic, arrastrá o usá la rueda".into();
+        }
+        Err(err) => {
+            app.mouse_active = false;
+            app.status = format!("ratón no disponible: {err}; usá el teclado");
+        }
+    }
     let result = app.run(&mut terminal);
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    disable_mouse_capture();
     ratatui::restore();
     result
+}
+
+fn enable_mouse_capture() -> io::Result<()> {
+    // Always re-assert both mouse tracking and SGR reporting. Some terminals
+    // drop one of these modes after a focus change, resize or a child process
+    // has changed terminal modes.
+    execute!(io::stdout(), EnableMouseCapture, EnableFocusChange)
+}
+
+fn disable_mouse_capture() {
+    let _ = execute!(io::stdout(), DisableFocusChange, DisableMouseCapture);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +325,7 @@ struct App {
     hitboxes: Vec<Hitbox>,
     drag: Option<Drag>,
     hover: Option<Rect>,
+    mouse_active: bool,
     modal: Option<Modal>,
 }
 
@@ -330,13 +351,19 @@ impl App {
             hitboxes: Vec::new(),
             drag: None,
             hover: None,
+            mouse_active: false,
             modal: None,
         }
     }
 
     fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         self.ensure_client();
+        let mut last_mouse_reassert = Instant::now();
         while !self.quit {
+            if self.mouse_active && last_mouse_reassert.elapsed() >= Duration::from_secs(5) {
+                last_mouse_reassert = Instant::now();
+                self.reassert_mouse();
+            }
             if self.last_poll.elapsed() > Duration::from_millis(120) {
                 self.poll();
                 self.last_poll = Instant::now();
@@ -354,11 +381,30 @@ impl App {
                         self.handle_mouse(mouse);
                         self.flush_edits(true);
                     }
+                    // A terminal may reset mouse reporting when it regains
+                    // focus or changes size. Re-assert the modes instead of
+                    // waiting for the user to restart the TUI.
+                    Event::FocusGained | Event::Resize(_, _) => {
+                        last_mouse_reassert = Instant::now();
+                        self.reassert_mouse();
+                    }
                     _ => {}
                 }
             }
         }
         Ok(())
+    }
+
+    fn reassert_mouse(&mut self) {
+        match enable_mouse_capture() {
+            Ok(()) => {
+                self.mouse_active = true;
+            }
+            Err(err) => {
+                self.mouse_active = false;
+                self.status = format!("ratón no disponible: {err}; usá el teclado");
+            }
+        }
     }
 
     fn ensure_client(&mut self) {
@@ -1081,7 +1127,8 @@ impl App {
     fn toggle_speaker(&mut self) {
         let profiles = self.state.voice_profiles.clone();
         self.edit_selected(|preset| {
-            if !preset.has_filter("speaker_lock") {
+            let was_present = preset.has_filter("speaker_lock");
+            if !was_present {
                 preset.add_filter("speaker_lock");
             }
             let profile = if profiles.is_empty() {
@@ -1096,7 +1143,9 @@ impl App {
                     ..
                 } = filter
                 {
-                    *enabled = !*enabled;
+                    if was_present {
+                        *enabled = !*enabled;
+                    }
                     if *enabled && p.is_empty() {
                         *p = profile.clone();
                     }
@@ -1409,7 +1458,7 @@ impl App {
         } else {
             "[ ] Silenciar"
         };
-        self.draw_button(
+        self.draw_toggle(
             frame,
             rows[2],
             mute_label,
@@ -1423,7 +1472,7 @@ impl App {
         } else {
             "[ ] Reducción de ruido (RNNoise)"
         };
-        self.draw_button(frame, rows[3], nr_label, Action::ToggleNoise, nr.is_some());
+        self.draw_toggle(frame, rows[3], nr_label, Action::ToggleNoise, nr.is_some());
         self.draw_slider(
             frame,
             rows[4],
@@ -1441,7 +1490,7 @@ impl App {
         } else {
             "[ ] Solo mi voz"
         };
-        self.draw_button(
+        self.draw_toggle(
             frame,
             rows[5],
             speaker_label,
@@ -1551,12 +1600,15 @@ impl App {
                 true,
             );
         } else {
+            let has_profile = speaker
+                .as_ref()
+                .is_some_and(|lock| !lock.profile.trim().is_empty());
             self.draw_button(
                 frame,
                 rows[11],
                 "Borrar perfil de voz",
                 Action::DeleteVoice,
-                speaker.is_some(),
+                has_profile,
             );
         }
         frame.render_widget(
@@ -1883,8 +1935,19 @@ impl App {
             Span::raw("salir  "),
             Span::styled(" Tab ", key_style()),
             Span::raw("sección  "),
-            Span::styled(" clic/rueda ", key_style()),
-            Span::raw("ratón  "),
+            Span::styled(
+                if self.mouse_active {
+                    " ratón "
+                } else {
+                    " teclado "
+                },
+                key_style(),
+            ),
+            Span::raw(if self.mouse_active {
+                "clic/rueda  "
+            } else {
+                "ratón no disponible  "
+            }),
             Span::styled(" n ", key_style()),
             Span::raw("nuevo  "),
             Span::styled(" e ", key_style()),
@@ -1982,6 +2045,38 @@ impl App {
             area,
         );
         self.register(area, Action::Slider(kind));
+    }
+
+    /// A toggle is always clickable; `active` only changes its appearance.
+    /// Previously the checkbox state was passed as `enabled`, which made the
+    /// control impossible to turn on with the mouse when it was off.
+    fn draw_toggle(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        label: &str,
+        action: Action,
+        active: bool,
+    ) {
+        let hovered = self.hover.is_some_and(|rect| rect == area);
+        let style = if hovered {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!(" {label} "), style)))
+                .alignment(Alignment::Center),
+            area,
+        );
+        self.register(area, action);
     }
 
     fn draw_button(
