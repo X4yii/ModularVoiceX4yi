@@ -379,7 +379,10 @@ impl App {
                     }
                     Event::Mouse(mouse) => {
                         self.handle_mouse(mouse);
-                        self.flush_edits(true);
+                        // Do not force a preset write on every drag event: the
+                        // normal throttle coalesces them and the final value is
+                        // flushed on mouse-up.
+                        self.flush_edits(false);
                     }
                     // A terminal may reset mouse reporting when it regains
                     // focus or changes size. Re-assert the modes instead of
@@ -562,7 +565,7 @@ impl App {
             return;
         }
         let throttle = if self.drag.is_some() {
-            Duration::from_millis(160)
+            Duration::from_millis(60)
         } else {
             Duration::from_millis(45)
         };
@@ -935,11 +938,13 @@ impl App {
             }
             SliderKind::Pitch => {
                 let value = -12.0 + rel * 24.0;
-                self.edit_selected(|preset| preset.pitch_semitones = (value * 2.0).round() / 2.0);
+                self.edit_selected(|preset| preset.pitch_semitones = (value * 10.0).round() / 10.0);
             }
             SliderKind::Formant => {
                 let value = -6.0 + rel * 12.0;
-                self.edit_selected(|preset| preset.formant_semitones = (value * 2.0).round() / 2.0);
+                self.edit_selected(|preset| {
+                    preset.formant_semitones = (value * 10.0).round() / 10.0
+                });
             }
         }
     }

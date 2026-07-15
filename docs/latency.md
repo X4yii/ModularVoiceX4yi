@@ -29,15 +29,15 @@ latencia base + DSP = total
 
 | Etapa | Latencia |
 |---|---:|
-| Signalsmith Ultra (512) | 10.67 ms |
-| Signalsmith Equilibrado (1024) | 21.33 ms |
-| Signalsmith Alta (2048) | 42.67 ms |
+| Signalsmith Ultra (1024) | 21.33 ms |
+| Signalsmith Equilibrado (2048) | 42.67 ms |
+| Signalsmith Alta (4096) | 85.33 ms |
 | RNNoise | 10 ms |
 | Compuerta de hablante (`lookahead_ms`) | 0–300 ms |
 | Limitador | 0 ms |
 | Ganancia / mute | 0 ms |
 
-Un preset con pitch/formantes y NR en calidad Ultra queda en ~20.7 ms de DSP. `Natural` queda en 0 ms de DSP.
+Un preset con pitch/formantes y NR en calidad Equilibrada queda en ~52.7 ms de DSP. `Natural` queda en 0 ms de DSP.
 
 `lookahead_ms` está en 0 por defecto. Aumentarlo retrasa el audio para que la decisión de la compuerta se aplique a muestras anteriores; es útil solo si preferís menos fugas después de una decisión y aceptás más latencia. No acelera la detección: la ventana de embedding sigue siendo de ~0,5 s.
 

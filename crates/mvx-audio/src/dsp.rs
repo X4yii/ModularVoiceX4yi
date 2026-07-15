@@ -14,6 +14,9 @@ use mvx_core::{Quality, SpeakerGate};
 const SAMPLE_RATE: f32 = 48_000.0;
 const MAX_CHUNK: usize = 8_192;
 const NOISE_FRAME: usize = FRAME_SIZE;
+const CONTROL_SMOOTH_SECONDS: f32 = 0.025;
+const GAIN_SMOOTH_SECONDS: f32 = 0.020;
+const TONALITY_LIMIT: f32 = 8_000.0 / 48_000.0;
 
 pub struct DspParams {
     pub pitch_semitones: f32,
@@ -47,6 +50,7 @@ pub struct DspChain {
     formant_control: Arc<AtomicU32>,
     last_pitch: f32,
     last_formant: f32,
+    gain_current: f32,
     latency_ms: f32,
 }
 
@@ -58,11 +62,18 @@ impl DspChain {
             let block = params.quality.block_size();
             let interval = params.quality.interval();
             let mut stretch = Stretch::new(1, block, interval);
-            stretch.set_transpose_factor_semitones(params.pitch_semitones, None);
+            stretch.set_transpose_factor_semitones(params.pitch_semitones, Some(TONALITY_LIMIT));
             stretch.set_formant_factor_semitones(params.formant_semitones, true);
             Some(stretch)
         } else {
             None
+        };
+
+        let gain_db = f32::from_bits(params.gain_db.load(Ordering::Relaxed));
+        let gain_current = if params.mute.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            10f32.powf(gain_db / 20.0)
         };
 
         let noise = params
@@ -107,6 +118,7 @@ impl DspChain {
             formant_control: params.formant_control,
             last_pitch: params.pitch_semitones,
             last_formant: params.formant_semitones,
+            gain_current,
             latency_ms,
         })
     }
@@ -121,22 +133,42 @@ impl DspChain {
         debug_assert_eq!(input.len(), output.len());
         let total = input.len().min(output.len());
         let gain_db = f32::from_bits(self.gain_db.load(Ordering::Relaxed));
-        let gain = if self.mute.load(Ordering::Relaxed) {
+        let gain_target = if self.mute.load(Ordering::Relaxed) {
             0.0
         } else {
             10f32.powf(gain_db / 20.0)
         };
+        smooth_toward(
+            &mut self.gain_current,
+            gain_target,
+            total,
+            GAIN_SMOOTH_SECONDS,
+        );
+        let gain = self.gain_current;
 
         if let Some(stretch) = self.stretch.as_mut() {
-            let pitch = f32::from_bits(self.pitch_control.load(Ordering::Relaxed));
-            if (pitch - self.last_pitch).abs() > 0.0001 {
-                stretch.set_transpose_factor_semitones(pitch, None);
-                self.last_pitch = pitch;
+            let pitch_target = f32::from_bits(self.pitch_control.load(Ordering::Relaxed));
+            let previous_pitch = self.last_pitch;
+            smooth_toward(
+                &mut self.last_pitch,
+                pitch_target,
+                total,
+                CONTROL_SMOOTH_SECONDS,
+            );
+            if (self.last_pitch - previous_pitch).abs() > 0.0001 {
+                stretch.set_transpose_factor_semitones(self.last_pitch, Some(TONALITY_LIMIT));
             }
-            let formant = f32::from_bits(self.formant_control.load(Ordering::Relaxed));
-            if (formant - self.last_formant).abs() > 0.0001 {
-                stretch.set_formant_factor_semitones(formant, true);
-                self.last_formant = formant;
+
+            let formant_target = f32::from_bits(self.formant_control.load(Ordering::Relaxed));
+            let previous_formant = self.last_formant;
+            smooth_toward(
+                &mut self.last_formant,
+                formant_target,
+                total,
+                CONTROL_SMOOTH_SECONDS,
+            );
+            if (self.last_formant - previous_formant).abs() > 0.0001 {
+                stretch.set_formant_factor_semitones(self.last_formant, true);
             }
         }
 
@@ -166,7 +198,7 @@ impl DspChain {
                     .iter_mut()
                     .zip(self.pitch_out[..len].iter())
                 {
-                    *dst = soft_limit(*src * gain);
+                    *dst = *src * gain;
                 }
             }
             pos += len;
@@ -209,7 +241,7 @@ impl DspChain {
                 self.gate_pos = 0;
             };
             self.gate_gain += (target_gain - self.gate_gain) * coeff;
-            output[index] = soft_limit(delayed * gain * self.gate_gain);
+            output[index] = delayed * gain * self.gate_gain;
         }
     }
 }
@@ -226,12 +258,14 @@ struct NoiseReducer {
     queue_write: usize,
     queue_len: usize,
     strength: Arc<AtomicU32>,
+    current_strength: f32,
     wet: [f32; NOISE_FRAME],
 }
 
 impl NoiseReducer {
     fn new(strength: f32, control: Arc<AtomicU32>) -> Self {
-        control.store(strength.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        let strength = strength.clamp(0.0, 1.0);
+        control.store(strength.to_bits(), Ordering::Relaxed);
         Self {
             state: DenoiseState::new(),
             input: [0.0; NOISE_FRAME],
@@ -241,6 +275,7 @@ impl NoiseReducer {
             queue_write: 0,
             queue_len: 0,
             strength: control,
+            current_strength: strength,
             wet: [0.0; NOISE_FRAME],
         }
     }
@@ -260,8 +295,14 @@ impl NoiseReducer {
                 }
                 let input_i16 = self.input.map(|v| v * 32768.0);
                 self.state.process_frame(&mut self.wet, &input_i16);
-                let strength =
-                    f32::from_bits(self.strength.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+                let target = f32::from_bits(self.strength.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+                smooth_toward(
+                    &mut self.current_strength,
+                    target,
+                    NOISE_FRAME,
+                    GAIN_SMOOTH_SECONDS,
+                );
+                let strength = self.current_strength;
                 let mut mixed = [0.0f32; NOISE_FRAME];
                 for (index, (wet, dry)) in self.wet.iter().zip(self.input.iter()).enumerate() {
                     mixed[index] = *wet / 32768.0 * strength + *dry * (1.0 - strength);
@@ -292,6 +333,21 @@ impl NoiseReducer {
         self.queue_read = (self.queue_read + 1) % self.queue.len();
         self.queue_len -= 1;
         sample
+    }
+}
+
+/// Move a control value toward its target with an exponential time constant.
+/// Slider updates arrive in small steps; feeding those steps straight into the
+/// phase vocoder causes audible zipper noise and warbling.
+fn smooth_toward(current: &mut f32, target: f32, frames: usize, seconds: f32) {
+    if frames == 0 || (*current - target).abs() <= f32::EPSILON {
+        *current = target;
+        return;
+    }
+    let coeff = 1.0 - (-(frames as f32) / (seconds * SAMPLE_RATE)).exp();
+    *current += (target - *current) * coeff;
+    if (target - *current).abs() < 0.0001 {
+        *current = target;
     }
 }
 
@@ -355,6 +411,69 @@ mod tests {
             assert!((a - b).abs() < 1e-6);
         }
         assert_eq!(chain.latency_ms(), 0.0);
+    }
+
+    #[test]
+    fn live_pitch_control_glides_instead_of_jumping() {
+        let gain = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+        let mute = Arc::new(AtomicBool::new(false));
+        let pitch = Arc::new(AtomicU32::new(6.0f32.to_bits()));
+        let mut chain = DspChain::new(DspParams {
+            pitch_semitones: 6.0,
+            formant_semitones: 0.0,
+            quality: Quality::Balanced,
+            noise_reduction: None,
+            speaker_gate: None,
+            speaker_lookahead_ms: 0,
+            gain_db: gain,
+            mute,
+            pitch_control: pitch.clone(),
+            formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+        })
+        .unwrap();
+        let input = vec![0.0; 256];
+        let mut output = vec![0.0; input.len()];
+
+        pitch.store(0.0f32.to_bits(), Ordering::Relaxed);
+        chain.process(&input, &mut output);
+        assert!(chain.last_pitch > 0.0 && chain.last_pitch < 6.0);
+
+        for _ in 0..40 {
+            chain.process(&input, &mut output);
+        }
+        assert!(chain.last_pitch.abs() < 0.001);
+    }
+
+    #[test]
+    fn gain_changes_are_smoothed() {
+        let gain = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+        let mute = Arc::new(AtomicBool::new(false));
+        let mut chain = DspChain::new(DspParams {
+            pitch_semitones: 0.0,
+            formant_semitones: 0.0,
+            quality: Quality::Balanced,
+            noise_reduction: None,
+            speaker_gate: None,
+            speaker_lookahead_ms: 0,
+            gain_db: gain.clone(),
+            mute,
+            pitch_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+        })
+        .unwrap();
+        let input = vec![0.25; 256];
+        let mut output = vec![0.0; input.len()];
+
+        gain.store((-20.0f32).to_bits(), Ordering::Relaxed);
+        chain.process(&input, &mut output);
+        assert!(output[0] > 0.15, "first block should not jump to -20 dB");
+
+        for _ in 0..40 {
+            chain.process(&input, &mut output);
+        }
+        assert!((output[0] - 0.025).abs() < 0.002);
     }
 
     #[test]

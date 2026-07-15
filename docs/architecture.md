@@ -63,7 +63,7 @@ No se usa `pw-loopback`, `pactl` ni un sink físico intermedio.
 `~/.config/mvx/presets.toml` guarda las definiciones:
 
 ```toml
-version = 1
+version = 2
 
 [[presets]]
 id = "voz_grave"
@@ -71,7 +71,7 @@ name = "Voz grave"
 builtin = true
 pitch_semitones = -5.0
 formant_semitones = -2.0
-quality = "ultra"
+quality = "balanced"
 
 [[presets.filters]]
 type = "noise_reduction"
@@ -92,15 +92,15 @@ hold_ms = 300
 lookahead_ms = 0
 ```
 
-Los built-in se pueden editar y restaurar. Los personalizados se pueden borrar. Pitch, formantes, intensidad de NR, umbral y hold se actualizan en vivo sin reconstruir. Los cambios que afectan la estructura DSP (pasar de bypass a Stretch o viceversa, calidad, NR on/off, Solo mi voz, perfil o lookahead) reconstruyen el camino de audio; ganancia y mute usan atómicos.
+Los built-in se pueden editar y restaurar. Los personalizados se pueden borrar. Pitch, formantes, intensidad de NR, umbral y hold se actualizan en vivo sin reconstruir. Pitch, formantes, NR y ganancia pasan por un suavizado exponencial en el callback para evitar saltos audibles. Los cambios que afectan la estructura DSP (pasar de bypass a Stretch o viceversa, calidad, NR on/off, Solo mi voz, perfil o lookahead) reconstruyen el camino de audio; ganancia y mute usan atómicos. Cambiar entre presets compatibles ya no fuerza una reconstrucción.
 
 ### Calidad DSP
 
 | Perfil | Bloque | Latencia aproximada |
 |---|---:|---:|
-| `Ultra` | 512 | 10.7 ms |
-| `Equilibrado` | 1024 | 21.3 ms |
-| `Alta` | 2048 | 42.7 ms |
+| `Ultra` | 1024 | 21.3 ms |
+| `Equilibrado` | 2048 | 42.7 ms |
+| `Alta` | 4096 | 85.3 ms |
 
 Si el preset no tiene pitch ni formantes, Signalsmith se omite y no agrega latencia.
 

@@ -15,7 +15,7 @@ Funciona de punta a punta en PipeWire nativo:
 - **Reducción de ruido** opcional con RNNoise (`nnnoiseless`).
 - **Solo mi voz**: verificación de hablante con CAM++ y VAD Silero; el audio de otras voces se atenúa.
 - **Ganancia maestra + ganancia por preset**, mute y limitador de seguridad.
-- **Calidad DSP** seleccionable: `Ultra` (~10.7 ms), `Equilibrado` (~21.3 ms) y `Alta` (~42.7 ms).
+- **Calidad DSP** seleccionable: `Ultra` (~21.3 ms), `Equilibrado` (~42.7 ms) y `Alta` (~85.3 ms).
 - Daemon `mvxd` con IPC Unix socket (protocolo v2).
 - TUI en español con ratón completo (clic, arrastre, rueda), teclado físico y dos secciones: **General** y **Dispositivos**.
 - Tray `mvx-tray` para hosts StatusNotifierItem (Noctalia, Waybar, KDE, etc.).
@@ -134,7 +134,8 @@ En el modal de texto se escribe con el teclado físico; no hay teclado en pantal
 
 - Los tres built-in se pueden editar y después recuperar con **Restaurar**.
 - **Nuevo preset** crea una copia personalizable del preset actual.
-- Los cambios de pitch, formantes, calidad, NR y Solo mi voz se aplican en vivo; la ganancia y el mute usan atómicos y no reconstruyen el camino de audio.
+- `Voz de ardilla` sube pitch y formantes juntos (+6 semitonos), que es lo que produce el timbre tipo Alvin y las ardillas.
+- Los cambios de pitch, formantes, intensidad de NR, ganancia y Solo mi voz se aplican en vivo; pitch, formantes, NR y ganancia se suavizan para evitar zipper noise. Cambiar entre presets con la misma estructura DSP ya no reconstruye el camino de audio.
 - La ganancia maestra se guarda en `config.toml`; la ganancia del preset se suma a la maestra.
 
 ## CLI
@@ -167,7 +168,7 @@ virtual_source_name = "mvx_mic"
 virtual_source_description = "MVX Microphone"
 
 [dsp]
-default_quality = "ultra"
+default_quality = "balanced"
 # speaker_model = "/ruta/al/modelo_campplus.onnx"
 # vad_model = "/ruta/al/silero_vad.onnx"
 speaker_analysis_hz = 4

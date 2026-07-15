@@ -153,6 +153,8 @@ struct Engine {
     speaker: Option<SpeakerWorker>,
     last_retry: Instant,
     link_warned: bool,
+    presets_dirty: bool,
+    last_presets_save: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -342,6 +344,8 @@ impl Engine {
             speaker: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
+            presets_dirty: false,
+            last_presets_save: Instant::now(),
         };
 
         engine.shared.set_presets(engine.presets.presets.clone());
@@ -438,9 +442,14 @@ impl Engine {
         preset.normalize();
         let rebuild = rebuild || self.needs_rebuild(&preset);
         self.active_preset = preset.clone();
+        let active_changed = self.config.presets.active != preset.id;
         self.config.presets.active = preset.id.clone();
-        if let Err(err) = self.config.save() {
-            debug!("no se pudo guardar el preset activo: {err}");
+        // Slider movements call this many times per second. Only the active
+        // preset id lives in config.toml, so avoid rewriting it on every tick.
+        if active_changed {
+            if let Err(err) = self.config.save() {
+                debug!("no se pudo guardar el preset activo: {err}");
+            }
         }
         self.shared.set_preset_state(&preset);
         self.shared.set_presets(self.presets.presets.clone());
@@ -465,7 +474,19 @@ impl Engine {
         Ok(())
     }
 
-    fn save_presets(&self) {
+    fn mark_presets_dirty(&mut self) {
+        self.presets_dirty = true;
+    }
+
+    fn flush_presets(&mut self, force: bool) {
+        if !self.presets_dirty {
+            return;
+        }
+        if !force && self.last_presets_save.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.presets_dirty = false;
+        self.last_presets_save = Instant::now();
         if let Err(err) = self.presets.save() {
             self.shared
                 .set_error(Some(format!("no se pudo guardar presets.toml: {err}")));
@@ -512,7 +533,8 @@ impl Engine {
                         .set_error(Some(format!("no existe el preset {id}")));
                     return;
                 };
-                if let Err(err) = self.apply_preset(preset, true) {
+                self.flush_presets(true);
+                if let Err(err) = self.apply_preset(preset, false) {
                     self.shared
                         .set_error(Some(format!("no se pudo aplicar el preset: {err}")));
                 }
@@ -523,7 +545,7 @@ impl Engine {
                         .set_error(Some(format!("preset inválido: {err}")));
                     return;
                 }
-                self.save_presets();
+                self.mark_presets_dirty();
                 self.shared.set_presets(self.presets.presets.clone());
                 if activate {
                     let stored = self.presets.find(&preset.id).cloned().unwrap_or(preset);
@@ -535,7 +557,8 @@ impl Engine {
             }
             AudioCommand::DeletePreset { id } => match self.presets.remove(&id) {
                 Ok(true) => {
-                    self.save_presets();
+                    self.mark_presets_dirty();
+                    self.flush_presets(true);
                     self.shared.set_presets(self.presets.presets.clone());
                     if self.active_preset.id == id {
                         let natural = self
@@ -543,7 +566,7 @@ impl Engine {
                             .find(mvx_core::PRESET_NATURAL)
                             .cloned()
                             .unwrap_or_else(|| self.presets.presets[0].clone());
-                        let _ = self.apply_preset(natural, true);
+                        let _ = self.apply_preset(natural, false);
                     }
                 }
                 Ok(false) => {}
@@ -551,11 +574,12 @@ impl Engine {
             },
             AudioCommand::ResetPreset { id } => match self.presets.reset_builtin(&id) {
                 Ok(true) => {
-                    self.save_presets();
+                    self.mark_presets_dirty();
+                    self.flush_presets(true);
                     self.shared.set_presets(self.presets.presets.clone());
                     if self.active_preset.id == id {
                         if let Some(preset) = self.presets.find(&id).cloned() {
-                            let _ = self.apply_preset(preset, true);
+                            let _ = self.apply_preset(preset, false);
                         }
                     }
                 }
@@ -605,7 +629,8 @@ impl Engine {
                             }
                             if changed {
                                 let _ = self.presets.upsert(preset.clone());
-                                self.save_presets();
+                                self.mark_presets_dirty();
+                                self.flush_presets(true);
                             }
                         }
                         // Even if the preset did not reference the profile (for
@@ -643,6 +668,7 @@ impl Engine {
             }
             AudioCommand::Tick => self.tick(),
             AudioCommand::Shutdown => {
+                self.flush_presets(true);
                 self.shared.set_running(false);
                 self.mainloop.quit();
             }
@@ -653,6 +679,7 @@ impl Engine {
         if self.dirty.replace(false) {
             self.refresh_devices();
         }
+        self.flush_presets(false);
 
         // If the selected physical source disappeared, fall back to the first one.
         let selected_exists = self

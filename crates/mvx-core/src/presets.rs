@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{presets_path, Quality};
 
-pub const PRESETS_VERSION: u32 = 1;
+pub const PRESETS_VERSION: u32 = 2;
 pub const DEFAULT_NOISE_STRENGTH: f32 = 0.75;
 
 pub const PRESET_NATURAL: &str = "natural";
@@ -208,9 +208,10 @@ impl PresetStore {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Self>(&text) {
                 Ok(mut store) => {
-                    if store.version == 0 {
-                        store.version = PRESETS_VERSION;
+                    if store.version < PRESETS_VERSION {
+                        store.migrate(store.version);
                     }
+                    store.version = PRESETS_VERSION;
                     store.ensure_builtins();
                     store
                 }
@@ -291,6 +292,38 @@ impl PresetStore {
         Ok(true)
     }
 
+    fn migrate(&mut self, from: u32) {
+        if from >= PRESETS_VERSION {
+            return;
+        }
+
+        if from < 2 {
+            for preset in &mut self.presets {
+                // The old quality labels used 512/1024/2048-sample windows.
+                // The new labels use 1024/2048/4096, so remap existing
+                // presets to keep the same effective block size and latency.
+                preset.quality = match preset.quality {
+                    Quality::Balanced => Quality::Ultra,
+                    Quality::High => Quality::Balanced,
+                    Quality::Ultra => Quality::Ultra,
+                };
+
+                // The first squirrel preset shifted the formants only half as
+                // far as the pitch. That sounds like a pitch-shifted voice,
+                // not like Alvin. Follow the pitch with the formants.
+                if preset.id == PRESET_ARDILLA && (preset.formant_semitones - 3.0).abs() < 0.001 {
+                    preset.formant_semitones = 6.0;
+                }
+
+                // Built-in modulation presets must start from a clean analysis
+                // window; the old `ultra` default caused warbling and clicks.
+                if preset.builtin && (preset.id == PRESET_ARDILLA || preset.id == PRESET_GRAVE) {
+                    preset.quality = Quality::Balanced;
+                }
+            }
+        }
+    }
+
     pub fn ensure_builtins(&mut self) {
         for default in builtin_presets() {
             if !self.presets.iter().any(|preset| preset.id == default.id) {
@@ -330,7 +363,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             builtin: true,
             pitch_semitones: 0.0,
             formant_semitones: 0.0,
-            quality: Quality::Ultra,
+            quality: Quality::Balanced,
             filters: vec![
                 FilterConfig::NoiseReduction {
                     enabled: false,
@@ -355,7 +388,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             builtin: true,
             pitch_semitones: -5.0,
             formant_semitones: -2.0,
-            quality: Quality::Ultra,
+            quality: Quality::Balanced,
             filters: vec![
                 FilterConfig::NoiseReduction {
                     enabled: false,
@@ -379,8 +412,8 @@ pub fn builtin_presets() -> Vec<Preset> {
             name: "Voz de ardilla".into(),
             builtin: true,
             pitch_semitones: 6.0,
-            formant_semitones: 3.0,
-            quality: Quality::Ultra,
+            formant_semitones: 6.0,
+            quality: Quality::Balanced,
             filters: vec![
                 FilterConfig::NoiseReduction {
                     enabled: false,
@@ -424,4 +457,60 @@ fn default_hold_ms() -> u32 {
 
 fn default_lookahead_ms() -> u32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preset(id: &str, builtin: bool, quality: Quality, formant_semitones: f32) -> Preset {
+        Preset {
+            id: id.into(),
+            name: id.into(),
+            builtin,
+            pitch_semitones: 6.0,
+            formant_semitones,
+            quality,
+            filters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn builtin_squirrel_tracks_pitch_with_formants() {
+        let squirrel = builtin_presets()
+            .into_iter()
+            .find(|preset| preset.id == PRESET_ARDILLA)
+            .unwrap();
+        assert_eq!(squirrel.pitch_semitones, 6.0);
+        assert_eq!(squirrel.formant_semitones, 6.0);
+        assert_eq!(squirrel.quality, Quality::Balanced);
+    }
+
+    #[test]
+    fn migration_preserves_effective_quality_and_fixes_squirrel() {
+        let mut store = PresetStore {
+            version: 1,
+            presets: vec![
+                preset(PRESET_ARDILLA, true, Quality::High, 3.0),
+                preset(PRESET_GRAVE, true, Quality::Ultra, -2.0),
+                preset("custom_high", false, Quality::High, 0.0),
+                preset("custom_balanced", false, Quality::Balanced, 0.0),
+            ],
+        };
+        store.migrate(1);
+        let squirrel = store.find(PRESET_ARDILLA).unwrap();
+        assert_eq!(squirrel.formant_semitones, 6.0);
+        assert_eq!(squirrel.quality, Quality::Balanced);
+        assert_eq!(store.find(PRESET_GRAVE).unwrap().quality, Quality::Balanced);
+        // Old High meant 2048 samples, which is the new Balanced setting.
+        assert_eq!(
+            store.find("custom_high").unwrap().quality,
+            Quality::Balanced
+        );
+        // Old Balanced meant 1024 samples, which is the new Ultra setting.
+        assert_eq!(
+            store.find("custom_balanced").unwrap().quality,
+            Quality::Ultra
+        );
+    }
 }

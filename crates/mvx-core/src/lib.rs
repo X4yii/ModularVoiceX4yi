@@ -22,8 +22,8 @@ pub const SOCKET_NAME: &str = "mvxd.sock";
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Quality {
-    #[default]
     Ultra,
+    #[default]
     Balanced,
     High,
 }
@@ -31,9 +31,13 @@ pub enum Quality {
 impl Quality {
     pub fn block_size(self) -> usize {
         match self {
-            Self::Ultra => 512,
-            Self::Balanced => 1024,
-            Self::High => 2048,
+            // The old 512-sample option was too short for clean voice: it
+            // produced audible phasiness and warbling. Keep this mode for
+            // low-latency monitoring, but give it enough analysis window to
+            // stay intelligible.
+            Self::Ultra => 1024,
+            Self::Balanced => 2048,
+            Self::High => 4096,
         }
     }
 
@@ -505,7 +509,7 @@ pub struct DspConfig {
 impl Default for DspConfig {
     fn default() -> Self {
         Self {
-            default_quality: Quality::Ultra,
+            default_quality: Quality::Balanced,
             speaker_model: None,
             vad_model: None,
             speaker_analysis_hz: 4,
