@@ -259,23 +259,59 @@ fn run_worker(
                 }
 
                 if let Some(enroll) = enrollment.as_mut() {
-                    enroll.samples.extend_from_slice(&resampled);
+                    if let Err(err) = mvx_core::validate_profile_name(&enroll.name) {
+                        shared.set_speaker_status(format!("perfil de voz inválido: {err}"));
+                        shared.set_speaker_enroll_progress(None);
+                        enrollment = None;
+                        continue;
+                    }
+
+                    // Only accumulate frames that contain active speech according to VAD.
+                    // This prevents enrolling silence, breathing, or background noise.
+                    if last_vad {
+                        enroll.samples.extend_from_slice(&resampled);
+                    }
+
+                    let progress = (enroll.samples.len() as f32 / enroll.target as f32).min(1.0);
+                    shared.set_speaker_enroll_progress(Some(progress));
+                    shared.set_speaker_status(format!(
+                        "enrolando «{}»: {:.0}% de voz detectada",
+                        enroll.name,
+                        progress * 100.0
+                    ));
+
                     if enroll.samples.len() >= enroll.target {
                         let samples = std::mem::take(&mut enroll.samples);
-                        let embedding = compute_embedding(&extractor, &samples)?;
-                        let new_profile = VoiceProfile {
-                            name: enroll.name.clone(),
-                            embedding,
-                            model: model.display().to_string(),
-                        };
-                        save_profile(&new_profile)?;
-                        profile = Some(new_profile);
-                        shared.set_speaker_enabled(true, true);
-                        shared.set_voice_profiles(mvx_core::list_voice_profiles());
-                        shared.set_speaker_status(format!("perfil «{}» guardado", enroll.name));
+                        match compute_embedding(&extractor, &samples) {
+                            Ok(embedding) => {
+                                let new_profile = VoiceProfile {
+                                    name: enroll.name.clone(),
+                                    embedding,
+                                    model: model.display().to_string(),
+                                };
+                                if let Err(err) = save_profile(&new_profile) {
+                                    shared.set_speaker_status(format!(
+                                        "error guardando perfil «{}»: {err}",
+                                        enroll.name
+                                    ));
+                                } else {
+                                    profile = Some(new_profile);
+                                    shared.set_speaker_enabled(true, true);
+                                    shared.set_voice_profiles(mvx_core::list_voice_profiles());
+                                    shared.set_speaker_status(format!("perfil «{}» guardado con éxito", enroll.name));
+                                    let hold_ms = shared.speaker_config().1;
+                                    hold_until = Instant::now() + Duration::from_millis(hold_ms as u64);
+                                }
+                            }
+                            Err(err) => {
+                                shared.set_speaker_status(format!(
+                                    "error procesando voz para «{}»: {err}",
+                                    enroll.name
+                                ));
+                            }
+                        }
+                        shared.set_speaker_enroll_progress(None);
                         enrollment = None;
-                        let hold_ms = shared.speaker_config().1;
-                        hold_until = Instant::now() + Duration::from_millis(hold_ms as u64);
                     }
                 }
             }

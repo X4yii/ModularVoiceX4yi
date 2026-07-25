@@ -3,10 +3,6 @@
 //! The tray is deliberately a separate process: the audio daemon must survive
 //! TUI/tray restarts.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -22,7 +18,7 @@ use mvx_ipc::{Client, Request};
 fn main() -> Result<()> {
     // Only one SNI tray may exist at a time. The lock is released by the
     // kernel when the process exits, so a crash never leaves a stale PID.
-    let Some(_instance) = acquire_instance_lock()? else {
+    let Some(_instance) = mvx_core::acquire_instance_lock("mvx-tray.lock")? else {
         return Ok(());
     };
 
@@ -49,45 +45,6 @@ fn main() -> Result<()> {
     loop {
         std::thread::park();
     }
-}
-
-struct InstanceLock {
-    path: PathBuf,
-    _file: File,
-}
-
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn acquire_instance_lock() -> Result<Option<InstanceLock>> {
-    let dir =
-        mvx_core::ensure_runtime_dir().context("no se pudo crear el directorio de ejecución")?;
-    let path = dir.join("mvx-tray.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(&path)
-        .with_context(|| format!("no se pudo abrir {}", path.display()))?;
-
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
-        }
-        return Err(err).with_context(|| format!("no se pudo bloquear {}", path.display()));
-    }
-
-    file.set_len(0)?;
-    let mut handle = &file;
-    writeln!(handle, "{}", std::process::id())?;
-    Ok(Some(InstanceLock { path, _file: file }))
 }
 
 struct MvxTray {

@@ -99,7 +99,10 @@ fn connect_or_start() -> Result<Client> {
         return Ok(client);
     }
 
-    start_daemon()?;
+    // If mvxd is already starting (lock held), don't spawn duplicate processes.
+    if !mvx_core::is_instance_locked("mvxd.lock") {
+        start_daemon()?;
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut last_err = None;
     while Instant::now() < deadline {
@@ -702,6 +705,10 @@ impl App {
                     self.status = "no hay un preset activo".into();
                     return;
                 };
+                if let Err(err) = mvx_core::validate_profile_name(&value) {
+                    self.status = format!("nombre de perfil inválido: {err}");
+                    return;
+                }
                 if !preset.has_filter("speaker_lock") {
                     preset.add_filter("speaker_lock");
                 }

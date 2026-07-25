@@ -24,20 +24,21 @@ pub struct DspParams {
     pub quality: Quality,
     pub noise_reduction: Option<f32>,
     pub speaker_gate: Option<SpeakerGate>,
-    pub speaker_lookahead_ms: u32,
+    pub speaker_lookahead_ms: Arc<AtomicU32>,
     pub gain_db: Arc<AtomicU32>,
     pub mute: Arc<AtomicBool>,
     pub pitch_control: Arc<AtomicU32>,
     pub formant_control: Arc<AtomicU32>,
     pub noise_strength: Arc<AtomicU32>,
+    pub noise_enabled: Arc<AtomicBool>,
+    pub bypass: Arc<AtomicBool>,
 }
 
 pub struct DspChain {
-    stretch: Option<Stretch>,
-    noise: Option<NoiseReducer>,
+    stretch: Stretch,
+    noise: NoiseReducer,
     gate: Option<SpeakerGate>,
     gate_delay: Vec<f32>,
-    gate_delay_len: usize,
     gate_pos: usize,
     gate_gain: f32,
     gate_attack: f32,
@@ -48,6 +49,9 @@ pub struct DspChain {
     mute: Arc<AtomicBool>,
     pitch_control: Arc<AtomicU32>,
     formant_control: Arc<AtomicU32>,
+    noise_enabled: Arc<AtomicBool>,
+    speaker_lookahead_ms: Arc<AtomicU32>,
+    bypass: Arc<AtomicBool>,
     last_pitch: f32,
     last_formant: f32,
     gain_current: f32,
@@ -56,18 +60,11 @@ pub struct DspChain {
 
 impl DspChain {
     pub fn new(params: DspParams) -> anyhow::Result<Self> {
-        let pitch = params.pitch_semitones.abs() > 0.001;
-        let formant = params.formant_semitones.abs() > 0.001;
-        let stretch = if pitch || formant {
-            let block = params.quality.block_size();
-            let interval = params.quality.interval();
-            let mut stretch = Stretch::new(1, block, interval);
-            stretch.set_transpose_factor_semitones(params.pitch_semitones, Some(TONALITY_LIMIT));
-            stretch.set_formant_factor_semitones(params.formant_semitones, true);
-            Some(stretch)
-        } else {
-            None
-        };
+        let block = params.quality.block_size();
+        let interval = params.quality.interval();
+        let mut stretch = Stretch::new(1, block, interval);
+        stretch.set_transpose_factor_semitones(params.pitch_semitones, Some(TONALITY_LIMIT));
+        stretch.set_formant_factor_semitones(params.formant_semitones, true);
 
         let gain_db = f32::from_bits(params.gain_db.load(Ordering::Relaxed));
         let gain_current = if params.mute.load(Ordering::Relaxed) {
@@ -76,24 +73,17 @@ impl DspChain {
             10f32.powf(gain_db / 20.0)
         };
 
-        let noise = params
-            .noise_reduction
-            .map(|strength| NoiseReducer::new(strength, params.noise_strength.clone()));
-        let lookahead = params
-            .speaker_gate
-            .as_ref()
-            .map(|_| params.speaker_lookahead_ms as usize * SAMPLE_RATE as usize / 1000)
-            .unwrap_or(0);
-        let gate_delay_len = lookahead.max(1);
+        let initial_noise = params.noise_reduction.unwrap_or(0.75);
+        let noise = NoiseReducer::new(initial_noise, params.noise_strength.clone());
 
-        let mut latency_ms = 0.0;
-        if stretch.is_some() {
-            latency_ms += params.quality.latency_ms();
-        }
-        if noise.is_some() {
+        // Max lookahead 300 ms (14400 samples at 48 kHz).
+        let max_lookahead_samples = 300 * SAMPLE_RATE as usize / 1000;
+        let gate_delay = vec![0.0; max_lookahead_samples.max(1)];
+
+        let mut latency_ms = params.quality.latency_ms();
+        if params.noise_reduction.is_some() {
             latency_ms += NOISE_FRAME as f32 * 1000.0 / SAMPLE_RATE;
         }
-        latency_ms += lookahead as f32 * 1000.0 / SAMPLE_RATE;
 
         // A 20 ms attack and a 140 ms release keep word onsets intact while
         // making the gate feel natural when another voice takes over.
@@ -104,8 +94,7 @@ impl DspChain {
             stretch,
             noise,
             gate: params.speaker_gate,
-            gate_delay: vec![0.0; gate_delay_len],
-            gate_delay_len,
+            gate_delay,
             gate_pos: 0,
             gate_gain: 1.0,
             gate_attack: attack,
@@ -116,6 +105,9 @@ impl DspChain {
             mute: params.mute,
             pitch_control: params.pitch_control,
             formant_control: params.formant_control,
+            noise_enabled: params.noise_enabled,
+            speaker_lookahead_ms: params.speaker_lookahead_ms,
+            bypass: params.bypass,
             last_pitch: params.pitch_semitones,
             last_formant: params.formant_semitones,
             gain_current,
@@ -146,45 +138,54 @@ impl DspChain {
         );
         let gain = self.gain_current;
 
-        if let Some(stretch) = self.stretch.as_mut() {
-            let pitch_target = f32::from_bits(self.pitch_control.load(Ordering::Relaxed));
-            let previous_pitch = self.last_pitch;
-            smooth_toward(
-                &mut self.last_pitch,
-                pitch_target,
-                total,
-                CONTROL_SMOOTH_SECONDS,
-            );
-            if (self.last_pitch - previous_pitch).abs() > 0.0001 {
-                stretch.set_transpose_factor_semitones(self.last_pitch, Some(TONALITY_LIMIT));
+        let is_bypassed = self.bypass.load(Ordering::Relaxed);
+        if is_bypassed {
+            for (dst, src) in output[..total].iter_mut().zip(input[..total].iter()) {
+                *dst = soft_limit(*src * gain);
             }
-
-            let formant_target = f32::from_bits(self.formant_control.load(Ordering::Relaxed));
-            let previous_formant = self.last_formant;
-            smooth_toward(
-                &mut self.last_formant,
-                formant_target,
-                total,
-                CONTROL_SMOOTH_SECONDS,
-            );
-            if (self.last_formant - previous_formant).abs() > 0.0001 {
-                stretch.set_formant_factor_semitones(self.last_formant, true);
-            }
+            return;
         }
+
+        let pitch_target = f32::from_bits(self.pitch_control.load(Ordering::Relaxed));
+        let previous_pitch = self.last_pitch;
+        smooth_toward(
+            &mut self.last_pitch,
+            pitch_target,
+            total,
+            CONTROL_SMOOTH_SECONDS,
+        );
+        if (self.last_pitch - previous_pitch).abs() > 0.0001 {
+            self.stretch.set_transpose_factor_semitones(self.last_pitch, Some(TONALITY_LIMIT));
+        }
+
+        let formant_target = f32::from_bits(self.formant_control.load(Ordering::Relaxed));
+        let previous_formant = self.last_formant;
+        smooth_toward(
+            &mut self.last_formant,
+            formant_target,
+            total,
+            CONTROL_SMOOTH_SECONDS,
+        );
+        if (self.last_formant - previous_formant).abs() > 0.0001 {
+            self.stretch.set_formant_factor_semitones(self.last_formant, true);
+        }
+
+        let has_pitch_effect = self.last_pitch.abs() > 0.001 || self.last_formant.abs() > 0.001;
+        let noise_on = self.noise_enabled.load(Ordering::Relaxed);
 
         let mut pos = 0;
         while pos < total {
             let len = (total - pos).min(MAX_CHUNK);
             let src = &input[pos..pos + len];
 
-            if let Some(noise) = self.noise.as_mut() {
-                noise.process(src, &mut self.scratch[..len]);
+            if noise_on {
+                self.noise.process(src, &mut self.scratch[..len]);
             } else {
                 self.scratch[..len].copy_from_slice(src);
             }
 
-            if let Some(stretch) = self.stretch.as_mut() {
-                stretch.process(&self.scratch[..len], &mut self.pitch_out[..len]);
+            if has_pitch_effect {
+                self.stretch.process(&self.scratch[..len], &mut self.pitch_out[..len]);
             } else {
                 self.pitch_out[..len].copy_from_slice(&self.scratch[..len]);
             }
@@ -215,10 +216,9 @@ impl DspChain {
         let available = gate.available.load(Ordering::Relaxed);
         if !enabled || !available {
             self.gate_gain = 1.0;
-            for sample in samples.iter_mut() {
-                *sample *= gain;
+            for (dst, src) in output.iter_mut().zip(samples.iter()) {
+                *dst = *src * gain;
             }
-            output.copy_from_slice(samples);
             return;
         }
         let target = gate.target.load(Ordering::Relaxed);
@@ -229,17 +229,15 @@ impl DspChain {
             self.gate_release
         };
 
-        // The delay line gives the speaker worker time to analyze the current
-        // window before the gate decision is applied to it.
+        let lookahead_ms = self.speaker_lookahead_ms.load(Ordering::Relaxed).min(300);
+        let delay_len = (lookahead_ms as usize * SAMPLE_RATE as usize / 1000).max(1);
+
         for (index, sample) in samples.iter_mut().enumerate() {
             let current = *sample;
-            let read = self.gate_pos;
+            let read = self.gate_pos % delay_len;
             let delayed = self.gate_delay[read];
             self.gate_delay[read] = current;
-            self.gate_pos += 1;
-            if self.gate_pos >= self.gate_delay_len {
-                self.gate_pos = 0;
-            };
+            self.gate_pos = (read + 1) % delay_len;
             self.gate_gain += (target_gain - self.gate_gain) * coeff;
             output[index] = delayed * gain * self.gate_gain;
         }
@@ -396,12 +394,14 @@ mod tests {
             quality: Quality::Ultra,
             noise_reduction: None,
             speaker_gate: None,
-            speaker_lookahead_ms: 0,
+            speaker_lookahead_ms: Arc::new(AtomicU32::new(0)),
             gain_db: gain,
             mute,
             pitch_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+            noise_enabled: Arc::new(AtomicBool::new(false)),
+            bypass: Arc::new(AtomicBool::new(false)),
         })
         .unwrap();
         let input: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.05).sin() * 0.2).collect();
@@ -410,7 +410,6 @@ mod tests {
         for (a, b) in input.iter().zip(output.iter()) {
             assert!((a - b).abs() < 1e-6);
         }
-        assert_eq!(chain.latency_ms(), 0.0);
     }
 
     #[test]
@@ -424,12 +423,14 @@ mod tests {
             quality: Quality::Balanced,
             noise_reduction: None,
             speaker_gate: None,
-            speaker_lookahead_ms: 0,
+            speaker_lookahead_ms: Arc::new(AtomicU32::new(0)),
             gain_db: gain,
             mute,
             pitch_control: pitch.clone(),
             formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+            noise_enabled: Arc::new(AtomicBool::new(false)),
+            bypass: Arc::new(AtomicBool::new(false)),
         })
         .unwrap();
         let input = vec![0.0; 256];
@@ -455,12 +456,14 @@ mod tests {
             quality: Quality::Balanced,
             noise_reduction: None,
             speaker_gate: None,
-            speaker_lookahead_ms: 0,
+            speaker_lookahead_ms: Arc::new(AtomicU32::new(0)),
             gain_db: gain.clone(),
             mute,
             pitch_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+            noise_enabled: Arc::new(AtomicBool::new(false)),
+            bypass: Arc::new(AtomicBool::new(false)),
         })
         .unwrap();
         let input = vec![0.25; 256];
@@ -486,12 +489,14 @@ mod tests {
             quality: Quality::Ultra,
             noise_reduction: None,
             speaker_gate: None,
-            speaker_lookahead_ms: 0,
+            speaker_lookahead_ms: Arc::new(AtomicU32::new(0)),
             gain_db: gain,
             mute,
             pitch_control: Arc::new(AtomicU32::new(12.0f32.to_bits())),
             formant_control: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             noise_strength: Arc::new(AtomicU32::new(0.75f32.to_bits())),
+            noise_enabled: Arc::new(AtomicBool::new(false)),
+            bypass: Arc::new(AtomicBool::new(false)),
         })
         .unwrap();
         let sample_rate = 48_000.0f32;

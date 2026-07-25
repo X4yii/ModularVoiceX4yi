@@ -150,6 +150,9 @@ struct Engine {
     pitch_control: Arc<AtomicU32>,
     formant_control: Arc<AtomicU32>,
     noise_strength: Arc<AtomicU32>,
+    noise_enabled: Arc<AtomicBool>,
+    speaker_lookahead_ms: Arc<AtomicU32>,
+    bypass: Arc<AtomicBool>,
     speaker: Option<SpeakerWorker>,
     last_retry: Instant,
     link_warned: bool,
@@ -291,15 +294,23 @@ impl Engine {
             &config.audio.virtual_source_name,
             &config.audio.virtual_source_description,
             config.audio.quantum,
+            config.audio.lock_quantum,
         )?;
 
-        let mut presets = PresetStore::load();
+        let (mut presets, presets_corrupt) = PresetStore::load_with_status();
         presets.ensure_builtins();
         let active_preset = presets
             .active(&config.presets.active)
             .cloned()
             .unwrap_or_else(|| presets.presets[0].clone());
-        let _ = presets.save();
+        if !presets_corrupt {
+            let _ = presets.save();
+        } else {
+            shared.set_error(Some(
+                "presets.toml corrupto: se usaron presets por defecto (respaldo en presets.toml.bak)"
+                    .into(),
+            ));
+        }
 
         let master_gain_db = config.audio.gain_db;
         let preset_gain_db = active_preset.gain_db();
@@ -314,6 +325,14 @@ impl Engine {
                 .unwrap_or(mvx_core::presets::DEFAULT_NOISE_STRENGTH)
                 .to_bits(),
         ));
+        let noise_enabled = Arc::new(AtomicBool::new(active_preset.noise_reduction().is_some()));
+        let speaker_lookahead_ms = Arc::new(AtomicU32::new(
+            active_preset
+                .speaker_lock()
+                .map(|l| l.lookahead_ms)
+                .unwrap_or(120),
+        ));
+        let bypass = Arc::new(AtomicBool::new(false));
 
         let mut engine = Self {
             capture: None,
@@ -341,6 +360,9 @@ impl Engine {
             pitch_control,
             formant_control,
             noise_strength,
+            noise_enabled,
+            speaker_lookahead_ms,
+            bypass,
             speaker: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
@@ -381,6 +403,7 @@ impl Engine {
     }
 
     fn physical_devices(&self) -> Vec<DeviceInfo> {
+        let virtual_name = &self.config.audio.virtual_source_name;
         let mut devices: Vec<_> = self
             .nodes
             .borrow()
@@ -389,6 +412,7 @@ impl Engine {
             .filter(|n| !n.name.starts_with("mvx."))
             .filter(|n| !n.name.contains(".monitor"))
             .filter(|n| !n.name.contains("echo-cancel"))
+            .filter(|n| &n.name != virtual_name)
             .map(|n| DeviceInfo {
                 id: n.id,
                 name: n.name.clone(),
@@ -424,17 +448,12 @@ impl Engine {
 
     fn needs_rebuild(&self, next: &Preset) -> bool {
         let old = &self.active_preset;
-        let old_stretch = old.pitch_semitones.abs() > 0.001 || old.formant_semitones.abs() > 0.001;
-        let new_stretch =
-            next.pitch_semitones.abs() > 0.001 || next.formant_semitones.abs() > 0.001;
-        old_stretch != new_stretch
-            || old.quality != next.quality
-            || old.noise_reduction().is_some() != next.noise_reduction().is_some()
+        old.quality != next.quality
             || old.speaker_lock().is_some() != next.speaker_lock().is_some()
             || old
                 .speaker_lock()
                 .zip(next.speaker_lock())
-                .map(|(a, b)| a.profile != b.profile || a.lookahead_ms != b.lookahead_ms)
+                .map(|(a, b)| a.profile != b.profile)
                 .unwrap_or(false)
     }
 
@@ -464,7 +483,11 @@ impl Engine {
                 .to_bits(),
             Ordering::Relaxed,
         );
+        self.noise_enabled
+            .store(preset.noise_reduction().is_some(), Ordering::Relaxed);
         if let Some(lock) = preset.speaker_lock() {
+            self.speaker_lookahead_ms
+                .store(lock.lookahead_ms, Ordering::Relaxed);
             self.shared.set_speaker_config(lock.threshold, lock.hold_ms);
         }
         self.update_gain_atomic();
@@ -587,6 +610,10 @@ impl Engine {
                 Err(err) => self.shared.set_error(Some(err.to_string())),
             },
             AudioCommand::EnrollVoice { name, seconds } => {
+                if let Err(err) = mvx_core::validate_profile_name(&name) {
+                    self.shared.set_error(Some(err));
+                    return;
+                }
                 if let Some(speaker) = &self.speaker {
                     speaker.request_enrollment(name.clone(), seconds);
                     self.shared
@@ -604,6 +631,10 @@ impl Engine {
                 }
             }
             AudioCommand::DeleteVoice { name } => {
+                if let Err(err) = mvx_core::validate_profile_name(&name) {
+                    self.shared.set_error(Some(err));
+                    return;
+                }
                 let path = mvx_core::profile_path(&name);
                 match std::fs::remove_file(path) {
                     Ok(()) => {
@@ -801,19 +832,17 @@ impl Engine {
             quality: self.active_preset.quality,
             noise_reduction: self.active_preset.noise_reduction(),
             speaker_gate: lock.as_ref().map(|_| self.shared.speaker_gate()),
-            speaker_lookahead_ms: lock.as_ref().map(|l| l.lookahead_ms).unwrap_or(0),
+            speaker_lookahead_ms: self.speaker_lookahead_ms.clone(),
             gain_db: self.gain.clone(),
             mute: self.mute.clone(),
             pitch_control: self.pitch_control.clone(),
             formant_control: self.formant_control.clone(),
             noise_strength: self.noise_strength.clone(),
+            noise_enabled: self.noise_enabled.clone(),
+            bypass: self.bypass.clone(),
         })?;
         self.shared.set_dsp_latency(dsp.latency_ms());
-        if lock.is_some() {
-            self.shared.set_speaker_enabled(false, false);
-            self.shared
-                .set_speaker_status("esperando modelo de voz y perfil");
-        } else {
+        if lock.is_none() {
             self.shared.set_speaker_enabled(false, false);
             self.shared.set_speaker_status("desactivado");
         }
@@ -894,6 +923,7 @@ impl Engine {
                 data.shared.inc_capture_block(frames);
 
                 let mut peak = 0.0f32;
+                let mut local_clips = 0u64;
                 let mut done = 0usize;
                 let capacity = data.mono.len();
                 'chunks: while done < frames {
@@ -912,7 +942,11 @@ impl Engine {
                             mono += sample;
                         }
                         mono /= channels as f32;
-                        peak = peak.max(mono.abs());
+                        let abs = mono.abs();
+                        peak = peak.max(abs);
+                        if abs >= 0.999 {
+                            local_clips += 1;
+                        }
                         data.mono[index] = mono;
                         if let Some(speaker) = data.speaker.as_mut() {
                             let _ = speaker.push(mono);
@@ -929,12 +963,11 @@ impl Engine {
                             data.shared.inc_overflow();
                             break 'chunks;
                         }
-                        if data.producer.push(*sample).is_err() {
-                            data.shared.inc_overflow();
-                            break 'chunks;
-                        }
                     }
                     done += chunk_frames;
+                }
+                if local_clips > 0 {
+                    data.shared.add_input_clip(local_clips);
                 }
                 data.shared.set_peak(peak);
             })
@@ -1026,35 +1059,46 @@ impl Engine {
                 // The capture side may fill the ring before the first playback
                 // callback runs. Keep only a small, bounded pre-roll so the
                 // bridge starts at low latency instead of inheriting the whole
-                // ring as latency.
-                let target = 2 * data.quantum * channels;
-                let max_prefill = 4 * data.quantum * channels;
+                // ring as latency. The ring buffer stores mono frames.
+                let target = 2 * data.quantum;
+                let max_prefill = 4 * data.quantum;
                 let slots = data.consumer.slots();
-                if !data.primed || slots > max_prefill {
+                if !data.primed {
+                    if slots < target {
+                        // Wait until buffer is primed with initial target frames
+                        let frames = slice.len() / stride;
+                        data.shared.inc_playback_block(frames);
+                        for b in slice.iter_mut() {
+                            *b = 0;
+                        }
+                        return;
+                    }
+                    data.primed = true;
+                } else if slots > max_prefill {
                     let excess = slots.saturating_sub(target);
                     for _ in 0..excess {
                         let _ = data.consumer.pop();
                     }
-                    data.primed = true;
                 }
-                let frames = (slice.len() / stride).min(data.quantum);
+                let frames = slice.len() / stride;
                 data.shared.inc_playback_block(frames);
                 data.shared.set_ring_fill(data.consumer.slots());
                 let mut underrun = false;
                 let mut peak = 0.0f32;
                 for frame in 0..frames {
                     let base = frame * stride;
+                    let sample = match data.consumer.pop() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            underrun = true;
+                            0.0
+                        }
+                    };
+                    peak = peak.max(sample.abs());
+                    let bytes = sample.to_le_bytes();
                     for ch in 0..channels {
-                        let sample = match data.consumer.pop() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                underrun = true;
-                                0.0
-                            }
-                        };
-                        peak = peak.max(sample.abs());
                         let start = base + ch * 4;
-                        slice[start..start + 4].copy_from_slice(&sample.to_le_bytes());
+                        slice[start..start + 4].copy_from_slice(&bytes);
                     }
                 }
                 if underrun {
@@ -1201,6 +1245,7 @@ fn create_virtual_source(
     name: &str,
     description: &str,
     quantum: u32,
+    lock_quantum: bool,
 ) -> Result<(
     Option<pw::node::Node>,
     Option<pw::proxy::ProxyListener>,
@@ -1213,16 +1258,20 @@ fn create_virtual_source(
         roundtrip(mainloop, core)?;
     }
 
-    let props = properties! {
-        "factory.name" => "support.null-audio-sink",
-        "node.name" => name,
-        "node.description" => description,
-        "media.class" => "Audio/Source/Virtual",
-        "audio.position" => "FL,FR",
-        "audio.channels" => "2",
-        "node.force-quantum" => quantum.max(1).to_string(),
-        "node.lock-quantum" => "true",
-    };
+        let mut props = properties! {
+            "factory.name" => "support.null-audio-sink",
+            "node.name" => name,
+            "node.description" => description,
+            "media.class" => "Audio/Source/Virtual",
+            "audio.position" => "FL,FR",
+            "audio.channels" => "2",
+        };
+        if lock_quantum {
+            props.insert("node.force-quantum", quantum.max(1).to_string());
+            props.insert("node.lock-quantum", "true");
+        } else {
+            props.insert("node.latency", format!("{}/{}", quantum.max(1), SAMPLE_RATE));
+        }
     let node = core
         .create_object::<pw::node::Node>("adapter", &props)
         .context("no se pudo crear el micrófono virtual (factory adapter)")?;
@@ -1261,8 +1310,82 @@ fn roundtrip(mainloop: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc) -> R
             }
         })
         .register();
+
+    let started = Instant::now();
+    let timeout = Duration::from_secs(3);
     while !done.get() {
+        if started.elapsed() > timeout {
+            anyhow::bail!("tiempo de espera agotado comunicándose con PipeWire (¿está corriendo el servidor?)");
+        }
         mainloop.run();
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_buffer_bridge_zero_underrun_under_steady_state() {
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
+        let block_size = 256;
+        let priming_target = block_size * 2;
+        let mut primed = false;
+        let mut underruns = 0usize;
+        let mut drops = 0usize;
+
+        let num_blocks = 100;
+        let mut captured_total = 0;
+        let mut played_total = 0;
+
+        for block_idx in 0..num_blocks {
+            // 1. Capture callback: receives mono samples and writes to ring
+            let cap_chunk: Vec<f32> = (0..block_size)
+                .map(|i| ((block_idx * block_size + i) as f32).sin())
+                .collect();
+
+            let free = producer.slots();
+            if free >= cap_chunk.len() {
+                for &s in &cap_chunk {
+                    let _ = producer.push(s);
+                }
+                captured_total += cap_chunk.len();
+            } else {
+                drops += 1;
+            }
+
+            // 2. Playback callback: reads mono samples and expands to stereo
+            let available = consumer.slots();
+            let mut out_stereo = vec![0.0f32; block_size * 2]; // 2 channels
+
+            if !primed {
+                if available >= priming_target {
+                    primed = true;
+                } else {
+                    // Pre-roll silence
+                    continue;
+                }
+            }
+
+            if available < block_size {
+                underruns += 1;
+            } else {
+                for frame_idx in 0..block_size {
+                    if let Ok(sample) = consumer.pop() {
+                        out_stereo[frame_idx * 2] = sample;
+                        out_stereo[frame_idx * 2 + 1] = sample;
+                        played_total += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(drops, 0, "no drops should occur with steady rate and sufficient capacity");
+        assert_eq!(underruns, 0, "no underruns should occur after priming in steady state");
+        assert!(primed, "bridge should have primed successfully");
+        assert!(captured_total > 0, "audio should have been captured");
+        assert!(played_total > 0, "audio should have been played");
+    }
+}
+

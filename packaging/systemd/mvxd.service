@@ -11,10 +11,6 @@ ExecStart=%h/.local/bin/mvxd
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
-# Audio RT priority; the user must have rtprio limits configured.
-Nice=-10
-LimitRTPRIO=95
-LimitMEMLOCK=infinity
 NoNewPrivileges=true
 PrivateTmp=true
 

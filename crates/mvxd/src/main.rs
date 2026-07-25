@@ -30,36 +30,45 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(args.verbose);
 
-    let config = Config::load();
-    if !mvx_core::config_path().exists() {
+    mvx_core::ensure_runtime_dir().context("creando el directorio runtime")?;
+
+    // Exclusive instance lock: only one mvxd daemon can run per user.
+    let _instance_lock = match mvx_core::acquire_instance_lock("mvxd.lock")? {
+        Some(lock) => lock,
+        None => {
+            info!("mvxd ya está en ejecución (bloqueo activo en mvxd.lock)");
+            return Ok(());
+        }
+    };
+
+    let (config, parse_error) = Config::load_with_status();
+    if !mvx_core::config_path().exists() && !parse_error {
         if let Err(err) = config.save() {
             warn!("no se pudo guardar la configuración inicial: {err}");
         }
     }
 
     let socket_path = mvx_core::socket_path();
-    if socket_path.exists() {
-        if UnixStream::connect(&socket_path).is_ok() {
-            info!("mvxd ya está en ejecución");
-            return Ok(());
-        }
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    mvx_core::ensure_runtime_dir().context("creando el directorio runtime")?;
+    let socket_guard = if args.no_ipc {
+        None
+    } else {
+        Some(SocketGuard::bind(socket_path.clone())?)
+    };
 
     let shared = Arc::new(SharedState::new(&config));
+    if parse_error {
+        shared.set_config_parse_error(true);
+        shared.set_error(Some(
+            "config.toml corrupto: se usó configuración por defecto (respaldo en config.toml.bak)"
+                .into(),
+        ));
+    }
     let engine = AudioEngine::new(shared.clone(), config)
         .context("no se pudo inicializar el motor de audio")?;
     let sender = engine.sender();
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let installing_models = Arc::new(AtomicBool::new(false));
-    let socket_guard = if args.no_ipc {
-        None
-    } else {
-        Some(SocketGuard::bind(socket_path.clone())?)
-    };
 
     if let Some(_guard) = &socket_guard {
         let listener = UnixListener::bind(&socket_path)

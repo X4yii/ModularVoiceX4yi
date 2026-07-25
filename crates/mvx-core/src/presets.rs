@@ -204,6 +204,10 @@ impl Default for PresetStore {
 
 impl PresetStore {
     pub fn load() -> Self {
+        Self::load_with_status().0
+    }
+
+    pub fn load_with_status() -> (Self, bool) {
         let path = presets_path();
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Self>(&text) {
@@ -213,14 +217,15 @@ impl PresetStore {
                     }
                     store.version = PRESETS_VERSION;
                     store.ensure_builtins();
-                    store
+                    (store, false)
                 }
                 Err(err) => {
+                    crate::backup_unreadable_file(&path);
                     eprintln!("mvx: no se pudo parsear {}: {err}", path.display());
-                    Self::default()
+                    (Self::default(), true)
                 }
             },
-            Err(_) => Self::default(),
+            Err(_) => (Self::default(), false),
         }
     }
 
