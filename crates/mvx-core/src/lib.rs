@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 pub mod presets;
 
 pub use presets::{
-    builtin_presets, FilterConfig, Preset, PresetStore, SpeakerLockConfig, PRESETS_VERSION,
-    PRESET_ARDILLA, PRESET_GRAVE, PRESET_NATURAL,
+    builtin_presets, ChorusConfig, CompressorConfig, DistortionConfig, FilterConfig,
+    NoiseGateConfig, Preset, PresetStore, ReverbConfig, SpeakerLockConfig, PRESETS_VERSION,
+    PRESET_ALIEN, PRESET_ANONYMOUS, PRESET_ARDILLA, PRESET_BROADCAST, PRESET_CAVE, PRESET_CYBORG,
+    PRESET_GRAVE, PRESET_HELIUM, PRESET_MEGAPHONE, PRESET_NATURAL, PRESET_POLICE,
+    PRESET_RADIO_DEMON, PRESET_TELEPHONE, PRESET_TITAN,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

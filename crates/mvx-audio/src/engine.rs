@@ -449,6 +449,7 @@ impl Engine {
     fn needs_rebuild(&self, next: &Preset) -> bool {
         let old = &self.active_preset;
         old.quality != next.quality
+            || old.filters != next.filters
             || old.speaker_lock().is_some() != next.speaker_lock().is_some()
             || old
                 .speaker_lock()
@@ -840,6 +841,7 @@ impl Engine {
             noise_strength: self.noise_strength.clone(),
             noise_enabled: self.noise_enabled.clone(),
             bypass: self.bypass.clone(),
+            preset: Some(self.active_preset.clone()),
         })?;
         self.shared.set_dsp_latency(dsp.latency_ms());
         if lock.is_none() {
@@ -958,12 +960,26 @@ impl Engine {
                         &mut data.processed[..chunk_frames],
                     );
 
+                    let metrics = data.dsp.last_metrics();
+                    data.shared.set_rms(metrics.input_rms, metrics.output_rms);
+                    data.shared.set_dynamics_reduction(
+                        metrics.gate_reduction_db,
+                        metrics.comp_reduction_db,
+                    );
+                    data.shared.set_spectrum(&metrics.spectrum);
+
+                    let mut out_peak = 0.0f32;
                     for sample in &data.processed[..chunk_frames] {
+                        let abs = sample.abs();
+                        if abs > out_peak {
+                            out_peak = abs;
+                        }
                         if data.producer.push(*sample).is_err() {
                             data.shared.inc_overflow();
                             break 'chunks;
                         }
                     }
+                    data.shared.set_output_peak(out_peak);
                     done += chunk_frames;
                 }
                 if local_clips > 0 {
