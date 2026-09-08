@@ -38,6 +38,12 @@ pub enum AudioCommand {
     ResetPreset { id: String },
     EnrollVoice { name: String, seconds: u32 },
     DeleteVoice { name: String },
+    SetBypass(bool),
+    SetMonitor { enabled: bool, gain_db: f32 },
+    StartLoopRecord,
+    StopLoopTest,
+    TriggerSound { id: String },
+    StopSounds,
     ReloadAudio,
     Rescan,
     Tick,
@@ -126,6 +132,7 @@ struct Engine {
     // Drop order matters: stop audio objects before the core/loop.
     capture: Option<Capture>,
     playback: Option<Playback>,
+    monitor_playback: Option<Playback>,
     links: Vec<pw::link::Link>,
     linked_ports: HashSet<(u32, u32)>,
     _virtual_listener: Option<pw::proxy::ProxyListener>,
@@ -153,6 +160,12 @@ struct Engine {
     noise_enabled: Arc<AtomicBool>,
     speaker_lookahead_ms: Arc<AtomicU32>,
     bypass: Arc<AtomicBool>,
+    monitor_enabled: Arc<AtomicBool>,
+    monitor_gain: Arc<AtomicU32>,
+    loop_state: Arc<AtomicU32>,
+    sounds: Arc<Vec<mvx_core::LoadedSound>>,
+    active_sound_index: Arc<std::sync::atomic::AtomicI32>,
+    active_sound_cursor: Arc<std::sync::atomic::AtomicUsize>,
     speaker: Option<SpeakerWorker>,
     last_retry: Instant,
     link_warned: bool,
@@ -190,12 +203,21 @@ struct Playback {
 
 struct CaptureData {
     producer: Producer<f32>,
+    monitor_producer: Option<Producer<f32>>,
+    monitor_enabled: Arc<AtomicBool>,
+    monitor_gain: Arc<AtomicU32>,
     channels: usize,
     dsp: DspChain,
     mono: Vec<f32>,
     processed: Vec<f32>,
     speaker: Option<Producer<f32>>,
     shared: Arc<SharedState>,
+    loop_state: Arc<AtomicU32>,
+    loop_buffer: Vec<f32>,
+    loop_pos: usize,
+    sounds: Arc<Vec<mvx_core::LoadedSound>>,
+    active_sound_index: Arc<std::sync::atomic::AtomicI32>,
+    active_sound_cursor: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct PlaybackData {
@@ -333,10 +355,18 @@ impl Engine {
                 .unwrap_or(120),
         ));
         let bypass = Arc::new(AtomicBool::new(false));
+        let monitor_enabled = Arc::new(AtomicBool::new(config.audio.monitor_enabled));
+        let monitor_gain_lin = 10f32.powf(config.audio.monitor_gain_db / 20.0);
+        let monitor_gain = Arc::new(AtomicU32::new(monitor_gain_lin.to_bits()));
+        let loop_state = Arc::new(AtomicU32::new(0));
+        let sounds = Arc::new(mvx_core::load_all_sounds());
+        let active_sound_index = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let active_sound_cursor = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut engine = Self {
             capture: None,
             playback: None,
+            monitor_playback: None,
             links: Vec::new(),
             linked_ports: HashSet::new(),
             _virtual_listener: virtual_listener,
@@ -363,12 +393,23 @@ impl Engine {
             noise_enabled,
             speaker_lookahead_ms,
             bypass,
+            monitor_enabled,
+            monitor_gain,
+            loop_state,
+            sounds,
+            active_sound_index,
+            active_sound_cursor,
             speaker: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
             presets_dirty: false,
             last_presets_save: Instant::now(),
         };
+
+        let clip_infos: Vec<_> = engine.sounds.iter().map(|s| s.to_info()).collect();
+        engine.shared.set_soundboard(clip_infos, None);
+        engine.shared.set_monitor(engine.config.audio.monitor_enabled, engine.config.audio.monitor_gain_db);
+        engine.shared.set_loop_test_state("idle");
 
         engine.shared.set_presets(engine.presets.presets.clone());
         engine.shared.set_preset_state(&engine.active_preset);
@@ -689,6 +730,38 @@ impl Engine {
                         .set_error(Some(format!("no se pudo borrar la voz {name}: {err}"))),
                 }
             }
+            AudioCommand::SetBypass(bypass) => {
+                self.bypass.store(bypass, Ordering::Relaxed);
+                self.shared.set_bypass(bypass);
+            }
+            AudioCommand::SetMonitor { enabled, gain_db } => {
+                self.monitor_enabled.store(enabled, Ordering::Relaxed);
+                let gain_lin = 10f32.powf(gain_db / 20.0);
+                self.monitor_gain.store(gain_lin.to_bits(), Ordering::Relaxed);
+                self.config.audio.monitor_enabled = enabled;
+                self.config.audio.monitor_gain_db = gain_db;
+                let _ = self.config.save();
+                self.shared.set_monitor(enabled, gain_db);
+            }
+            AudioCommand::StartLoopRecord => {
+                self.loop_state.store(1, Ordering::Relaxed);
+                self.shared.set_loop_test_state("recording");
+            }
+            AudioCommand::StopLoopTest => {
+                self.loop_state.store(0, Ordering::Relaxed);
+                self.shared.set_loop_test_state("idle");
+            }
+            AudioCommand::TriggerSound { id } => {
+                if let Some(pos) = self.sounds.iter().position(|s| s.id == id) {
+                    self.active_sound_cursor.store(0, Ordering::Relaxed);
+                    self.active_sound_index.store(pos as i32, Ordering::Relaxed);
+                    self.shared.set_active_sound_clip(Some(id));
+                }
+            }
+            AudioCommand::StopSounds => {
+                self.active_sound_index.store(-1, Ordering::Relaxed);
+                self.shared.set_active_sound_clip(None);
+            }
             AudioCommand::ReloadAudio => {
                 if let Err(err) = self.rebuild_audio_path() {
                     self.shared
@@ -755,6 +828,7 @@ impl Engine {
     fn rebuild_audio_path(&mut self) -> Result<()> {
         self.capture = None;
         self.playback = None;
+        self.monitor_playback = None;
         self.speaker = None;
         self.links.clear();
         self.linked_ports.clear();
@@ -796,8 +870,10 @@ impl Engine {
         };
 
         let (producer, consumer) = RingBuffer::new(RING_CAPACITY);
+        let (mon_producer, mon_consumer) = RingBuffer::new(RING_CAPACITY);
         self.playback = Some(self.create_playback(consumer)?);
-        self.capture = Some(self.create_capture(producer, speaker_producer)?);
+        self.monitor_playback = Some(self.create_monitor(mon_consumer)?);
+        self.capture = Some(self.create_capture(producer, Some(mon_producer), speaker_producer)?);
         Ok(())
     }
 
@@ -820,6 +896,7 @@ impl Engine {
     fn create_capture(
         &self,
         producer: Producer<f32>,
+        monitor_producer: Option<Producer<f32>>,
         speaker: Option<Producer<f32>>,
     ) -> Result<Capture> {
         let stream =
@@ -851,12 +928,21 @@ impl Engine {
 
         let data = CaptureData {
             producer,
+            monitor_producer,
+            monitor_enabled: self.monitor_enabled.clone(),
+            monitor_gain: self.monitor_gain.clone(),
             channels: CHANNELS as usize,
             dsp,
             mono: vec![0.0; 8_192],
             processed: vec![0.0; 8_192],
             speaker,
             shared: self.shared.clone(),
+            loop_state: self.loop_state.clone(),
+            loop_buffer: Vec::with_capacity(8 * SAMPLE_RATE as usize),
+            loop_pos: 0,
+            sounds: self.sounds.clone(),
+            active_sound_index: self.active_sound_index.clone(),
+            active_sound_cursor: self.active_sound_cursor.clone(),
         };
 
         let listener = stream
@@ -924,6 +1010,7 @@ impl Engine {
                 let frames = (end - offset) / frame_bytes;
                 data.shared.inc_capture_block(frames);
 
+                let loop_st = data.loop_state.load(Ordering::Relaxed);
                 let mut peak = 0.0f32;
                 let mut local_clips = 0u64;
                 let mut done = 0usize;
@@ -944,6 +1031,21 @@ impl Engine {
                             mono += sample;
                         }
                         mono /= channels as f32;
+
+                        if loop_st == 1 {
+                            // Recording loop test audio
+                            if data.loop_buffer.len() < 8 * SAMPLE_RATE as usize {
+                                data.loop_buffer.push(mono);
+                            } else {
+                                data.loop_state.store(2, Ordering::Relaxed);
+                                data.shared.set_loop_test_state("playing");
+                            }
+                        } else if loop_st == 2 && !data.loop_buffer.is_empty() {
+                            // Playing loop test audio cyclically
+                            mono = data.loop_buffer[data.loop_pos % data.loop_buffer.len()];
+                            data.loop_pos = (data.loop_pos + 1) % data.loop_buffer.len();
+                        }
+
                         let abs = mono.abs();
                         peak = peak.max(abs);
                         if abs >= 0.999 {
@@ -960,6 +1062,23 @@ impl Engine {
                         &mut data.processed[..chunk_frames],
                     );
 
+                    // Soundboard ducking and mixing
+                    let sound_idx = data.active_sound_index.load(Ordering::Relaxed);
+                    if sound_idx >= 0 && (sound_idx as usize) < data.sounds.len() {
+                        let sound = &data.sounds[sound_idx as usize];
+                        for frame in 0..chunk_frames {
+                            let cursor = data.active_sound_cursor.fetch_add(1, Ordering::Relaxed);
+                            if cursor < sound.samples.len() {
+                                let s = sound.samples[cursor];
+                                data.processed[frame] = data.processed[frame] * 0.3 + s;
+                            } else {
+                                data.active_sound_index.store(-1, Ordering::Relaxed);
+                                data.shared.set_active_sound_clip(None);
+                                break;
+                            }
+                        }
+                    }
+
                     let metrics = data.dsp.last_metrics();
                     data.shared.set_rms(metrics.input_rms, metrics.output_rms);
                     data.shared.set_dynamics_reduction(
@@ -967,6 +1086,9 @@ impl Engine {
                         metrics.comp_reduction_db,
                     );
                     data.shared.set_spectrum(&metrics.spectrum);
+
+                    let mon_on = data.monitor_enabled.load(Ordering::Relaxed);
+                    let mon_gain = f32::from_bits(data.monitor_gain.load(Ordering::Relaxed));
 
                     let mut out_peak = 0.0f32;
                     for sample in &data.processed[..chunk_frames] {
@@ -977,6 +1099,11 @@ impl Engine {
                         if data.producer.push(*sample).is_err() {
                             data.shared.inc_overflow();
                             break 'chunks;
+                        }
+                        if mon_on {
+                            if let Some(mon_prod) = data.monitor_producer.as_mut() {
+                                let _ = mon_prod.push(*sample * mon_gain);
+                            }
                         }
                     }
                     data.shared.set_output_peak(out_peak);
@@ -1002,6 +1129,90 @@ impl Engine {
         Ok(Capture {
             _listener: listener,
             _stream: stream,
+        })
+    }
+
+    fn create_monitor(&self, consumer: Consumer<f32>) -> Result<Playback> {
+        let props = properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Playback",
+            *pw::keys::MEDIA_ROLE => "Communication",
+            *pw::keys::NODE_NAME => "mvx.monitor",
+            *pw::keys::NODE_DESCRIPTION => "MVX Monitor (Sidetone)",
+            *pw::keys::AUDIO_CHANNELS => "2",
+            *pw::keys::NODE_LATENCY => format!("{}/{}", self.config.audio.quantum.max(1), SAMPLE_RATE),
+        };
+
+        let stream = pw::stream::StreamRc::new(self.core.clone(), "mvx-monitor", props)
+            .context("no se pudo crear el stream de sidetone/monitor")?;
+        let data = PlaybackData {
+            consumer,
+            channels: CHANNELS as usize,
+            quantum: self.config.audio.quantum.max(1) as usize,
+            primed: false,
+            shared: self.shared.clone(),
+        };
+
+        let listener = stream
+            .add_local_listener_with_user_data(data)
+            .state_changed(|_, data, _old, new| match new {
+                pw::stream::StreamState::Error(msg) => {
+                    data.shared.set_error(Some(format!("monitor: {msg}")));
+                }
+                _ => {}
+            })
+            .process(|stream, data| {
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
+                let datas = buffer.datas_mut();
+                let Some(data_buf) = datas.first_mut() else {
+                    return;
+                };
+                let channels = data.channels.max(1);
+                let stride = std::mem::size_of::<f32>() * channels;
+                let Some(slice) = data_buf.data() else { return };
+                let frames = slice.len() / stride;
+
+                let target = 2 * data.quantum;
+                let slots = data.consumer.slots();
+                if !data.primed {
+                    if slots < target {
+                        for b in slice.iter_mut() {
+                            *b = 0;
+                        }
+                        return;
+                    }
+                    data.primed = true;
+                }
+
+                for frame in 0..frames {
+                    let base = frame * stride;
+                    let sample = data.consumer.pop().unwrap_or(0.0);
+                    let bytes = sample.to_le_bytes();
+                    for ch in 0..channels {
+                        let start = base + ch * 4;
+                        slice[start..start + 4].copy_from_slice(&bytes);
+                    }
+                }
+            })
+            .register()
+            .context("no se pudo registrar el listener de monitor")?;
+
+        connect_audio_stream(
+            &stream,
+            spa::utils::Direction::Output,
+            None,
+            pw::stream::StreamFlags::AUTOCONNECT
+                | pw::stream::StreamFlags::MAP_BUFFERS
+                | pw::stream::StreamFlags::RT_PROCESS,
+        )?;
+
+        let id = stream.node_id();
+        Ok(Playback {
+            _listener: listener,
+            _stream: stream,
+            node_id: id,
         })
     }
 

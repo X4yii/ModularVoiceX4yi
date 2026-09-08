@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 pub mod presets;
+pub mod soundboard;
 
 pub use presets::{
     builtin_presets, ChorusConfig, CompressorConfig, DistortionConfig, FilterConfig,
@@ -16,6 +17,7 @@ pub use presets::{
     PRESET_GRAVE, PRESET_HELIUM, PRESET_MEGAPHONE, PRESET_NATURAL, PRESET_POLICE,
     PRESET_RADIO_DEMON, PRESET_TELEPHONE, PRESET_TITAN,
 };
+pub use soundboard::{decode_wav, encode_wav_i16, load_all_sounds, LoadedSound};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: u32 = 2;

@@ -201,6 +201,42 @@ fn handle_client(
                     Err(_) => Response::error("el motor de audio no está disponible"),
                 }
             }
+            Request::SetBypass { bypass } => {
+                match sender.send(AudioCommand::SetBypass(bypass)) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::SetMonitor { enabled, gain_db } => {
+                match sender.send(AudioCommand::SetMonitor { enabled, gain_db }) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::StartLoopRecord => {
+                match sender.send(AudioCommand::StartLoopRecord) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::StopLoopTest => {
+                match sender.send(AudioCommand::StopLoopTest) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::TriggerSound { id } => {
+                match sender.send(AudioCommand::TriggerSound { id }) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::StopSounds => {
+                match sender.send(AudioCommand::StopSounds) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
             Request::InstallModels => {
                 if installing_models.swap(true, Ordering::Relaxed) {
                     Response::error("la descarga de modelos ya está en curso")
