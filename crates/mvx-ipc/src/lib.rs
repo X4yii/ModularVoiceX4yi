@@ -111,6 +111,70 @@ impl Client {
             other => anyhow::bail!("respuesta inesperada: {other:?}"),
         }
     }
+
+    pub fn set_mute(&mut self, mute: bool) -> anyhow::Result<()> {
+        match self.request(&Request::SetMute { mute })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn set_bypass(&mut self, bypass: bool) -> anyhow::Result<()> {
+        match self.request(&Request::SetBypass { bypass })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn set_monitor(&mut self, enabled: bool, gain_db: f32) -> anyhow::Result<()> {
+        match self.request(&Request::SetMonitor { enabled, gain_db })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn apply_preset(&mut self, id: String) -> anyhow::Result<()> {
+        match self.request(&Request::ApplyPreset { id })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn trigger_sound(&mut self, id: String) -> anyhow::Result<()> {
+        match self.request(&Request::TriggerSound { id })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn stop_sounds(&mut self) -> anyhow::Result<()> {
+        match self.request(&Request::StopSounds)? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn start_loop_record(&mut self) -> anyhow::Result<()> {
+        match self.request(&Request::StartLoopRecord)? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn stop_loop_test(&mut self) -> anyhow::Result<()> {
+        match self.request(&Request::StopLoopTest)? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
 }
 
 pub fn read_request(reader: &mut BufReader<UnixStream>) -> anyhow::Result<Option<Request>> {

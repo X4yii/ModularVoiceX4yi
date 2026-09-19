@@ -32,8 +32,17 @@ struct Args {
 enum CliCommand {
     /// Open the interactive TUI.
     Tui,
-    /// Print one state snapshot.
-    Status,
+    /// Print one state snapshot (use --waybar for Waybar custom module JSON).
+    Status {
+        /// Format as a single-line JSON for Waybar / Polybar module.
+        #[arg(long)]
+        waybar: bool,
+    },
+    /// Quick CLI control commands (toggle mute, bypass, monitor, presets, soundboard).
+    Ctl {
+        #[command(subcommand)]
+        action: CtlAction,
+    },
     /// List available input devices.
     Devices,
     /// Diagnose the daemon and audio path.
@@ -43,15 +52,42 @@ enum CliCommand {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Ask the daemon to exit.
+    /// Ask mvxd to exit.
     Shutdown,
+}
+
+#[derive(Debug, Subcommand)]
+enum CtlAction {
+    /// Toggle microphone mute.
+    ToggleMute,
+    /// Toggle DSP bypass (clean microphone).
+    ToggleBypass,
+    /// Toggle real-time Sidetone / monitor in headphones.
+    ToggleMonitor,
+    /// Set monitor volume (in dB).
+    MonitorGain { gain_db: f32 },
+    /// Apply a voice preset by its ID.
+    Preset { id: String },
+    /// Switch to the next preset.
+    NextPreset,
+    /// Switch to the previous preset.
+    PrevPreset,
+    /// Trigger a soundboard sound by its ID.
+    Sound { id: String },
+    /// Stop all playing soundboard sounds.
+    StopSounds,
+    /// Control the Voice Tester Loop (record, stop, toggle).
+    LoopTest {
+        #[arg(default_value = "toggle")]
+        action: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum ModelsAction {
     /// Download the CAM++ speaker model and Silero VAD model.
     Install,
-    /// Show whether the models are installed.
+    /// Print the model file paths and verification status.
     Status,
 }
 
@@ -59,10 +95,115 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command.unwrap_or(CliCommand::Tui) {
         CliCommand::Tui => run_tui(),
-        CliCommand::Status => {
+        CliCommand::Status { waybar } => {
             let mut client = connect_or_start()?;
             let state = client.state()?;
-            println!("{}", serde_json::to_string_pretty(&state)?);
+            if waybar {
+                let (text, alt, class) = if state.muted {
+                    ("🔇 MUTE".to_string(), "muted", "muted")
+                } else if state.bypass {
+                    ("⚡ BYPASS".to_string(), "bypass", "warning")
+                } else {
+                    (format!("🎙️ {}", state.active_preset_name), "active", "active")
+                };
+                let tooltip = format!(
+                    "ModularVoiceX4yi\nPreset: {}\nLatencia: {:.1} ms\nSidetone: {}\nBypass: {}",
+                    state.active_preset_name,
+                    state.total_latency_ms,
+                    if state.monitor_enabled { "On" } else { "Off" },
+                    if state.bypass { "On" } else { "Off" }
+                );
+                let json = serde_json::json!({
+                    "text": text,
+                    "alt": alt,
+                    "tooltip": tooltip,
+                    "class": class,
+                    "percentage": if state.muted { 0 } else { 100 },
+                });
+                println!("{}", json);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+            }
+            Ok(())
+        }
+        CliCommand::Ctl { action } => {
+            let mut client = connect_or_start()?;
+            match action {
+                CtlAction::ToggleMute => {
+                    let state = client.state()?;
+                    client.set_mute(!state.muted)?;
+                    println!("Mute: {}", if !state.muted { "activado" } else { "desactivado" });
+                }
+                CtlAction::ToggleBypass => {
+                    let state = client.state()?;
+                    client.set_bypass(!state.bypass)?;
+                    println!("Bypass: {}", if !state.bypass { "activado" } else { "desactivado" });
+                }
+                CtlAction::ToggleMonitor => {
+                    let state = client.state()?;
+                    client.set_monitor(!state.monitor_enabled, state.monitor_gain_db)?;
+                    println!("Sidetone / Monitor: {}", if !state.monitor_enabled { "activado" } else { "desactivado" });
+                }
+                CtlAction::MonitorGain { gain_db } => {
+                    let state = client.state()?;
+                    client.set_monitor(state.monitor_enabled, gain_db)?;
+                    println!("Sidetone volumen: {:.1} dB", gain_db);
+                }
+                CtlAction::Preset { id } => {
+                    client.apply_preset(id.clone())?;
+                    println!("Preset aplicado: {}", id);
+                }
+                CtlAction::NextPreset => {
+                    let state = client.state()?;
+                    if !state.presets.is_empty() {
+                        let cur_idx = state.presets.iter().position(|p| p.id == state.active_preset).unwrap_or(0);
+                        let next_idx = (cur_idx + 1) % state.presets.len();
+                        let next_id = &state.presets[next_idx].id;
+                        client.apply_preset(next_id.clone())?;
+                        println!("Preset: {}", state.presets[next_idx].name);
+                    }
+                }
+                CtlAction::PrevPreset => {
+                    let state = client.state()?;
+                    if !state.presets.is_empty() {
+                        let cur_idx = state.presets.iter().position(|p| p.id == state.active_preset).unwrap_or(0);
+                        let prev_idx = if cur_idx == 0 { state.presets.len() - 1 } else { cur_idx - 1 };
+                        let prev_id = &state.presets[prev_idx].id;
+                        client.apply_preset(prev_id.clone())?;
+                        println!("Preset: {}", state.presets[prev_idx].name);
+                    }
+                }
+                CtlAction::Sound { id } => {
+                    client.trigger_sound(id.clone())?;
+                    println!("Reproduciendo sonido: {}", id);
+                }
+                CtlAction::StopSounds => {
+                    client.stop_sounds()?;
+                    println!("Sonidos detenidos");
+                }
+                CtlAction::LoopTest { action } => {
+                    let state = client.state()?;
+                    match action.to_lowercase().as_str() {
+                        "record" | "rec" => {
+                            client.start_loop_record()?;
+                            println!("Loop tester: grabando 8s...");
+                        }
+                        "stop" => {
+                            client.stop_loop_test()?;
+                            println!("Loop tester: detenido");
+                        }
+                        _ => {
+                            if state.loop_test_state == "idle" {
+                                client.start_loop_record()?;
+                                println!("Loop tester: grabando 8s...");
+                            } else {
+                                client.stop_loop_test()?;
+                                println!("Loop tester: detenido");
+                            }
+                        }
+                    }
+                }
+            }
             Ok(())
         }
         CliCommand::Devices => {
@@ -99,7 +240,6 @@ fn connect_or_start() -> Result<Client> {
         return Ok(client);
     }
 
-    // If mvxd is already starting (lock held), don't spawn duplicate processes.
     if !mvx_core::is_instance_locked("mvxd.lock") {
         start_daemon()?;
     }
@@ -135,7 +275,6 @@ fn start_tray() -> Result<()> {
     spawn_detached(&program, "mvx-tray.log").context("no se pudo iniciar mvx-tray")
 }
 
-/// Start a helper in its own session so closing the terminal does not kill it.
 fn spawn_detached(program: &Path, log_name: &str) -> Result<()> {
     let _ = mvx_core::ensure_runtime_dir();
     let log_path = mvx_core::runtime_dir().join(log_name);
@@ -207,9 +346,6 @@ fn run_tui() -> Result<()> {
 }
 
 fn enable_mouse_capture() -> io::Result<()> {
-    // Always re-assert both mouse tracking and SGR reporting. Some terminals
-    // drop one of these modes after a focus change, resize or a child process
-    // has changed terminal modes.
     execute!(io::stdout(), EnableMouseCapture, EnableFocusChange)
 }
 
@@ -219,20 +355,42 @@ fn disable_mouse_capture() {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
-    General,
-    Devices,
+    Estudio,
+    VoiceLab,
+    Soundboard,
+    Dispositivos,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SliderKind {
     Master,
     PresetGain,
+    MonitorGain,
     Noise,
     Threshold,
+    #[allow(dead_code)]
     Hold,
+    #[allow(dead_code)]
     Lookahead,
     Pitch,
     Formant,
+    HpfCutoff,
+    GateThreshold,
+    EqLow,
+    EqMid,
+    EqHigh,
+    CompThreshold,
+    CompRatio,
+    CompMakeup,
+    ChorusMix,
+    RobotFreq,
+    RobotMix,
+    RingFreq,
+    RingMix,
+    DistDrive,
+    DistMix,
+    ReverbRoom,
+    ReverbMix,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,8 +402,14 @@ enum Action {
     ResetPreset,
     DeletePreset,
     ToggleMute,
+    ToggleBypass,
+    ToggleMonitor,
+    ToggleLoopRecord,
+    TriggerSound(String),
+    StopSounds,
     Slider(SliderKind),
     Quality(Quality),
+    ToggleFilter(&'static str),
     ToggleNoise,
     ToggleSpeaker,
     CycleProfile,
@@ -319,6 +483,7 @@ struct App {
     master_dirty: bool,
     tab: Tab,
     selected_device: usize,
+    selected_sound: usize,
     status: String,
     last_poll: Instant,
     last_start: Instant,
@@ -343,8 +508,9 @@ impl App {
             last_send: Instant::now() - Duration::from_secs(5),
             master_edit: 0.0,
             master_dirty: false,
-            tab: Tab::General,
+            tab: Tab::Estudio,
             selected_device: 0,
+            selected_sound: 0,
             status: "conectando…".into(),
             last_poll: Instant::now() - Duration::from_secs(10),
             last_start: Instant::now() - Duration::from_secs(10),
@@ -382,14 +548,8 @@ impl App {
                     }
                     Event::Mouse(mouse) => {
                         self.handle_mouse(mouse);
-                        // Do not force a preset write on every drag event: the
-                        // normal throttle coalesces them and the final value is
-                        // flushed on mouse-up.
                         self.flush_edits(false);
                     }
-                    // A terminal may reset mouse reporting when it regains
-                    // focus or changes size. Re-assert the modes instead of
-                    // waiting for the user to restart the TUI.
                     Event::FocusGained | Event::Resize(_, _) => {
                         last_mouse_reassert = Instant::now();
                         self.reassert_mouse();
@@ -469,6 +629,9 @@ impl App {
                 }
                 if self.selected_device >= self.state.devices.len() {
                     self.selected_device = self.state.devices.len().saturating_sub(1);
+                }
+                if self.selected_sound >= self.state.sound_clips.len() {
+                    self.selected_sound = self.state.sound_clips.len().saturating_sub(1);
                 }
                 if !self.master_dirty {
                     self.master_edit = self.state.gain_db;
@@ -610,33 +773,75 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab => {
                 self.tab = match self.tab {
-                    Tab::General => Tab::Devices,
-                    Tab::Devices => Tab::General,
+                    Tab::Estudio => Tab::VoiceLab,
+                    Tab::VoiceLab => Tab::Soundboard,
+                    Tab::Soundboard => Tab::Dispositivos,
+                    Tab::Dispositivos => Tab::Estudio,
                 };
             }
-            KeyCode::Char('g') => self.tab = Tab::General,
-            KeyCode::Char('d') => self.tab = Tab::Devices,
-            KeyCode::Up | KeyCode::Char('k') if self.tab == Tab::General => {
-                self.move_preset(-1);
+            KeyCode::BackTab => {
+                self.tab = match self.tab {
+                    Tab::Estudio => Tab::Dispositivos,
+                    Tab::VoiceLab => Tab::Estudio,
+                    Tab::Soundboard => Tab::VoiceLab,
+                    Tab::Dispositivos => Tab::Soundboard,
+                };
             }
-            KeyCode::Down | KeyCode::Char('j') if self.tab == Tab::General => {
-                self.move_preset(1);
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected_device = self.selected_device.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !self.state.devices.is_empty() {
-                    self.selected_device =
-                        (self.selected_device + 1).min(self.state.devices.len() - 1);
+            KeyCode::F(1) => self.tab = Tab::Estudio,
+            KeyCode::F(2) => self.tab = Tab::VoiceLab,
+            KeyCode::F(3) => self.tab = Tab::Soundboard,
+            KeyCode::F(4) => self.tab = Tab::Dispositivos,
+
+            KeyCode::Char('1') if self.tab != Tab::Soundboard => self.tab = Tab::Estudio,
+            KeyCode::Char('2') if self.tab != Tab::Soundboard => self.tab = Tab::VoiceLab,
+            KeyCode::Char('3') if self.tab != Tab::Soundboard => self.tab = Tab::Soundboard,
+            KeyCode::Char('4') if self.tab != Tab::Soundboard => self.tab = Tab::Dispositivos,
+
+            KeyCode::Char(c @ '1'..='9') if self.tab == Tab::Soundboard => {
+                let idx = (c as u8 - b'1') as usize;
+                if let Some(clip) = self.state.sound_clips.get(idx) {
+                    let id = clip.id.clone();
+                    self.send(Request::TriggerSound { id: id.clone() });
+                    self.status = format!("reproduciendo: {id}");
                 }
             }
-            KeyCode::Enter if self.tab == Tab::General => self.apply_selected(),
-            KeyCode::Enter => self.select_device(self.selected_device),
+
+            KeyCode::Up | KeyCode::Char('k') => match self.tab {
+                Tab::Estudio | Tab::VoiceLab => self.move_preset(-1),
+                Tab::Soundboard => self.move_sound(-1),
+                Tab::Dispositivos => {
+                    self.selected_device = self.selected_device.saturating_sub(1);
+                }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.tab {
+                Tab::Estudio | Tab::VoiceLab => self.move_preset(1),
+                Tab::Soundboard => self.move_sound(1),
+                Tab::Dispositivos => {
+                    if !self.state.devices.is_empty() {
+                        self.selected_device =
+                            (self.selected_device + 1).min(self.state.devices.len() - 1);
+                    }
+                }
+            },
+            KeyCode::Enter => match self.tab {
+                Tab::Estudio | Tab::VoiceLab => self.apply_selected(),
+                Tab::Soundboard => {
+                    if let Some(clip) = self.state.sound_clips.get(self.selected_sound) {
+                        let id = clip.id.clone();
+                        self.send(Request::TriggerSound { id: id.clone() });
+                        self.status = format!("reproduciendo: {id}");
+                    }
+                }
+                Tab::Dispositivos => self.select_device(self.selected_device),
+            },
+            KeyCode::Char(' ') => self.stop_sounds(),
             KeyCode::Char('n') => self.open_new_preset(),
             KeyCode::Char('r') => self.reset_selected(),
             KeyCode::Char('m') => self.toggle_mute(),
-            KeyCode::Char('s') => self.toggle_speaker(),
+            KeyCode::Char('b') => self.toggle_bypass(),
+            KeyCode::Char('s') => self.toggle_monitor(),
+            KeyCode::Char('v') => self.toggle_speaker(),
+            KeyCode::Char('l') => self.toggle_loop_test(),
             KeyCode::Char('e') => self.open_enroll(),
             KeyCode::Char('i') => self.install_models(),
             KeyCode::Char('+') | KeyCode::Char('=') => self.bump_master(1.0),
@@ -790,8 +995,14 @@ impl App {
                             -1.0
                         };
                         self.adjust_slider(kind, delta);
-                    } else if self.tab == Tab::General {
+                    } else if matches!(self.tab, Tab::Estudio | Tab::VoiceLab) {
                         self.move_preset(if mouse.kind == MouseEventKind::ScrollUp {
+                            -1
+                        } else {
+                            1
+                        });
+                    } else if self.tab == Tab::Soundboard {
+                        self.move_sound(if mouse.kind == MouseEventKind::ScrollUp {
                             -1
                         } else {
                             1
@@ -845,12 +1056,34 @@ impl App {
                 self.delete_selected();
             }
             Action::ToggleMute => self.toggle_mute(),
+            Action::ToggleBypass => self.toggle_bypass(),
+            Action::ToggleMonitor => self.toggle_monitor(),
+            Action::ToggleLoopRecord => self.toggle_loop_test(),
+            Action::TriggerSound(id) => {
+                self.send(Request::TriggerSound { id: id.clone() });
+                self.status = format!("reproduciendo: {id}");
+            }
+            Action::StopSounds => self.stop_sounds(),
             Action::Slider(kind) => {
                 self.adjust_slider(kind, 0.0);
             }
             Action::Quality(quality) => {
                 self.edit_selected(|preset| preset.quality = quality);
                 self.status = format!("calidad DSP: {}", quality.label());
+            }
+            Action::ToggleFilter(kind) => {
+                self.edit_selected(|preset| {
+                    let was_present = preset.has_filter(kind);
+                    if !was_present {
+                        preset.add_filter(kind);
+                    } else {
+                        preset.filters.iter_mut().for_each(|f| {
+                            if f.kind() == kind {
+                                f.set_enabled(!f.enabled());
+                            }
+                        });
+                    }
+                });
             }
             Action::ToggleNoise => self.toggle_noise(),
             Action::ToggleSpeaker => self.toggle_speaker(),
@@ -888,6 +1121,15 @@ impl App {
                             *gain_db = value.round();
                         }
                     });
+                });
+            }
+            SliderKind::MonitorGain => {
+                let value = -24.0 + rel * 36.0;
+                let val = value.round();
+                let enabled = self.state.monitor_enabled;
+                self.send(Request::SetMonitor {
+                    enabled,
+                    gain_db: val,
                 });
             }
             SliderKind::Noise => {
@@ -953,6 +1195,276 @@ impl App {
                     preset.formant_semitones = (value * 10.0).round() / 10.0
                 });
             }
+            SliderKind::HpfCutoff => {
+                let value = 20.0 + rel * 280.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("high_pass") {
+                        preset.add_filter("high_pass");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::HighPass {
+                            cutoff_hz, enabled, ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *cutoff_hz = (value / 5.0).round() * 5.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::GateThreshold => {
+                let value = -60.0 + rel * 60.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("noise_gate") {
+                        preset.add_filter("noise_gate");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::NoiseGate {
+                            threshold_db,
+                            enabled,
+                            ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *threshold_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::EqLow => {
+                let value = -15.0 + rel * 30.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("equalizer") {
+                        preset.add_filter("equalizer");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Equalizer { low_db, enabled, .. } = f {
+                            *enabled = true;
+                            *low_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::EqMid => {
+                let value = -15.0 + rel * 30.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("equalizer") {
+                        preset.add_filter("equalizer");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Equalizer { mid_db, enabled, .. } = f {
+                            *enabled = true;
+                            *mid_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::EqHigh => {
+                let value = -15.0 + rel * 30.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("equalizer") {
+                        preset.add_filter("equalizer");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Equalizer {
+                            high_db, enabled, ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *high_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::CompThreshold => {
+                let value = -40.0 + rel * 40.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("compressor") {
+                        preset.add_filter("compressor");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Compressor {
+                            threshold_db,
+                            enabled,
+                            ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *threshold_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::CompRatio => {
+                let value = 1.0 + rel * 9.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("compressor") {
+                        preset.add_filter("compressor");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Compressor { ratio, enabled, .. } = f {
+                            *enabled = true;
+                            *ratio = (value * 10.0).round() / 10.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::CompMakeup => {
+                let value = rel * 24.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("compressor") {
+                        preset.add_filter("compressor");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Compressor {
+                            makeup_db, enabled, ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *makeup_db = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::ChorusMix => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("chorus") {
+                        preset.add_filter("chorus");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Chorus { mix, enabled, .. } = f {
+                            *enabled = true;
+                            *mix = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::RobotFreq => {
+                let value = 20.0 + rel * 480.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("robotizer") {
+                        preset.add_filter("robotizer");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Robotizer {
+                            frequency_hz,
+                            enabled,
+                            ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *frequency_hz = (value / 5.0).round() * 5.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::RobotMix => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("robotizer") {
+                        preset.add_filter("robotizer");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Robotizer { mix, enabled, .. } = f {
+                            *enabled = true;
+                            *mix = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::RingFreq => {
+                let value = 50.0 + rel * 1950.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("ring_mod") {
+                        preset.add_filter("ring_mod");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::RingMod {
+                            frequency_hz,
+                            enabled,
+                            ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *frequency_hz = (value / 10.0).round() * 10.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::RingMix => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("ring_mod") {
+                        preset.add_filter("ring_mod");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::RingMod { mix, enabled, .. } = f {
+                            *enabled = true;
+                            *mix = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::DistDrive => {
+                let value = rel * 24.0;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("distortion") {
+                        preset.add_filter("distortion");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Distortion { drive, enabled, .. } = f {
+                            *enabled = true;
+                            *drive = value.round();
+                        }
+                    });
+                });
+            }
+            SliderKind::DistMix => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("distortion") {
+                        preset.add_filter("distortion");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Distortion { mix, enabled, .. } = f {
+                            *enabled = true;
+                            *mix = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::ReverbRoom => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("reverb") {
+                        preset.add_filter("reverb");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Reverb {
+                            room_size, enabled, ..
+                        } = f
+                        {
+                            *enabled = true;
+                            *room_size = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
+            SliderKind::ReverbMix => {
+                let value = rel;
+                self.edit_selected(|preset| {
+                    if !preset.has_filter("reverb") {
+                        preset.add_filter("reverb");
+                    }
+                    preset.filters.iter_mut().for_each(|f| {
+                        if let FilterConfig::Reverb { mix, enabled, .. } = f {
+                            *enabled = true;
+                            *mix = (value * 100.0).round() / 100.0;
+                        }
+                    });
+                });
+            }
         }
     }
 
@@ -960,6 +1472,13 @@ impl App {
         match kind {
             SliderKind::Master => self.bump_master(direction),
             SliderKind::PresetGain => self.bump_preset_gain(direction),
+            SliderKind::MonitorGain => {
+                let val = (self.state.monitor_gain_db + direction * 1.0).clamp(-24.0, 12.0);
+                self.send(Request::SetMonitor {
+                    enabled: self.state.monitor_enabled,
+                    gain_db: val,
+                });
+            }
             SliderKind::Noise => self.edit_selected(|preset| {
                 if let Some(FilterConfig::NoiseReduction { strength, .. }) = preset
                     .filters
@@ -1003,6 +1522,159 @@ impl App {
             SliderKind::Formant => self.edit_selected(|preset| {
                 preset.formant_semitones =
                     (preset.formant_semitones + direction * 0.5).clamp(-6.0, 6.0)
+            }),
+            SliderKind::HpfCutoff => self.edit_selected(|preset| {
+                if let Some(FilterConfig::HighPass { cutoff_hz, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::HighPass { .. }))
+                {
+                    *cutoff_hz = (*cutoff_hz + direction * 10.0).clamp(20.0, 300.0);
+                }
+            }),
+            SliderKind::GateThreshold => self.edit_selected(|preset| {
+                if let Some(FilterConfig::NoiseGate { threshold_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::NoiseGate { .. }))
+                {
+                    *threshold_db = (*threshold_db + direction * 1.0).clamp(-60.0, 0.0);
+                }
+            }),
+            SliderKind::EqLow => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Equalizer { low_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
+                {
+                    *low_db = (*low_db + direction * 1.0).clamp(-15.0, 15.0);
+                }
+            }),
+            SliderKind::EqMid => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Equalizer { mid_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
+                {
+                    *mid_db = (*mid_db + direction * 1.0).clamp(-15.0, 15.0);
+                }
+            }),
+            SliderKind::EqHigh => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Equalizer { high_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
+                {
+                    *high_db = (*high_db + direction * 1.0).clamp(-15.0, 15.0);
+                }
+            }),
+            SliderKind::CompThreshold => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Compressor { threshold_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
+                {
+                    *threshold_db = (*threshold_db + direction * 1.0).clamp(-40.0, 0.0);
+                }
+            }),
+            SliderKind::CompRatio => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Compressor { ratio, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
+                {
+                    *ratio = (*ratio + direction * 0.5).clamp(1.0, 10.0);
+                }
+            }),
+            SliderKind::CompMakeup => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Compressor { makeup_db, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
+                {
+                    *makeup_db = (*makeup_db + direction * 1.0).clamp(0.0, 24.0);
+                }
+            }),
+            SliderKind::ChorusMix => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Chorus { mix, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Chorus { .. }))
+                {
+                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
+                }
+            }),
+            SliderKind::RobotFreq => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Robotizer { frequency_hz, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Robotizer { .. }))
+                {
+                    *frequency_hz = (*frequency_hz + direction * 10.0).clamp(20.0, 500.0);
+                }
+            }),
+            SliderKind::RobotMix => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Robotizer { mix, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Robotizer { .. }))
+                {
+                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
+                }
+            }),
+            SliderKind::RingFreq => self.edit_selected(|preset| {
+                if let Some(FilterConfig::RingMod { frequency_hz, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::RingMod { .. }))
+                {
+                    *frequency_hz = (*frequency_hz + direction * 25.0).clamp(50.0, 2000.0);
+                }
+            }),
+            SliderKind::RingMix => self.edit_selected(|preset| {
+                if let Some(FilterConfig::RingMod { mix, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::RingMod { .. }))
+                {
+                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
+                }
+            }),
+            SliderKind::DistDrive => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Distortion { drive, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Distortion { .. }))
+                {
+                    *drive = (*drive + direction * 1.0).clamp(0.0, 24.0);
+                }
+            }),
+            SliderKind::DistMix => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Distortion { mix, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Distortion { .. }))
+                {
+                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
+                }
+            }),
+            SliderKind::ReverbRoom => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Reverb { room_size, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Reverb { .. }))
+                {
+                    *room_size = (*room_size + direction * 0.05).clamp(0.0, 1.0);
+                }
+            }),
+            SliderKind::ReverbMix => self.edit_selected(|preset| {
+                if let Some(FilterConfig::Reverb { mix, .. }) = preset
+                    .filters
+                    .iter_mut()
+                    .find(|f| matches!(f, FilterConfig::Reverb { .. }))
+                {
+                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
+                }
             }),
         }
     }
@@ -1056,6 +1728,15 @@ impl App {
         self.selected_preset = id;
         self.draft = Some(self.state.presets[next].clone());
         self.needs_send = false;
+    }
+
+    fn move_sound(&mut self, delta: i32) {
+        if self.state.sound_clips.is_empty() {
+            return;
+        }
+        let next = (self.selected_sound as i32 + delta)
+            .clamp(0, self.state.sound_clips.len() as i32 - 1) as usize;
+        self.selected_sound = next;
     }
 
     fn apply_selected(&mut self) {
@@ -1119,6 +1800,44 @@ impl App {
         } else {
             "mute OFF".into()
         };
+    }
+
+    fn toggle_bypass(&mut self) {
+        let bypass = !self.state.bypass;
+        self.send(Request::SetBypass { bypass });
+        self.status = if bypass {
+            "bypass ON (micrófono limpio)".into()
+        } else {
+            "bypass OFF (DSP activo)".into()
+        };
+    }
+
+    fn toggle_monitor(&mut self) {
+        let enabled = !self.state.monitor_enabled;
+        self.send(Request::SetMonitor {
+            enabled,
+            gain_db: self.state.monitor_gain_db,
+        });
+        self.status = if enabled {
+            "sidetone / monitor ON".into()
+        } else {
+            "sidetone / monitor OFF".into()
+        };
+    }
+
+    fn toggle_loop_test(&mut self) {
+        if self.state.loop_test_state == "idle" {
+            self.send(Request::StartLoopRecord);
+            self.status = "loop tester: grabando 8s...".into();
+        } else {
+            self.send(Request::StopLoopTest);
+            self.status = "loop tester: detenido".into();
+        }
+    }
+
+    fn stop_sounds(&mut self) {
+        self.send(Request::StopSounds);
+        self.status = "sonidos detenidos".into();
     }
 
     fn toggle_noise(&mut self) {
@@ -1250,8 +1969,10 @@ impl App {
 
         self.draw_header(frame, outer[0]);
         match self.tab {
-            Tab::General => self.draw_general(frame, outer[1]),
-            Tab::Devices => self.draw_devices(frame, outer[1]),
+            Tab::Estudio => self.draw_estudio(frame, outer[1]),
+            Tab::VoiceLab => self.draw_voice_lab(frame, outer[1]),
+            Tab::Soundboard => self.draw_soundboard(frame, outer[1]),
+            Tab::Dispositivos => self.draw_devices(frame, outer[1]),
         }
         self.draw_footer(frame, outer[2]);
         if self.modal.is_some() {
@@ -1265,7 +1986,7 @@ impl App {
         frame.render_widget(block, area);
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(30), Constraint::Length(26)])
+            .constraints([Constraint::Min(35), Constraint::Length(52)])
             .split(inner);
 
         let running = if self.state.running {
@@ -1278,7 +1999,8 @@ impl App {
         } else {
             Color::Red
         };
-        let title = Line::from(vec![
+
+        let mut spans = vec![
             Span::styled(
                 " MVX ",
                 Style::default()
@@ -1286,24 +2008,51 @@ impl App {
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" ModularVoiceX4yi  "),
+            Span::raw(" ModularVoiceX4yi "),
             Span::styled(
-                running,
+                format!(" {} ", running),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "   {:.1} ms   preset: {}",
+                " {:.1}ms · {}",
                 self.state.total_latency_ms, self.state.active_preset_name
             )),
-        ]);
-        frame.render_widget(Paragraph::new(title), chunks[0]);
+        ];
+
+        if self.state.bypass {
+            spans.push(Span::styled(
+                " [⚡BYPASS]",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if self.state.monitor_enabled {
+            spans.push(Span::styled(
+                " [🎧SIDETONE]",
+                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if self.state.muted {
+            spans.push(Span::styled(
+                " [🔇MUTE]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
 
         let tabs = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
             .split(chunks[1]);
-        self.draw_tab_button(frame, tabs[0], "General", Tab::General);
-        self.draw_tab_button(frame, tabs[1], "Dispositivos", Tab::Devices);
+        self.draw_tab_button(frame, tabs[0], "1 Estudio", Tab::Estudio);
+        self.draw_tab_button(frame, tabs[1], "2 Voice Lab", Tab::VoiceLab);
+        self.draw_tab_button(frame, tabs[2], "3 Soundboard", Tab::Soundboard);
+        self.draw_tab_button(frame, tabs[3], "4 Disp.", Tab::Dispositivos);
     }
 
     fn draw_tab_button(&mut self, frame: &mut Frame<'_>, area: Rect, label: &str, tab: Tab) {
@@ -1324,17 +2073,17 @@ impl App {
         self.register(area, Action::Tab(tab));
     }
 
-    fn draw_general(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    fn draw_estudio(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(27),
-                Constraint::Percentage(40),
-                Constraint::Percentage(33),
+                Constraint::Percentage(26),
+                Constraint::Percentage(44),
+                Constraint::Percentage(30),
             ])
             .split(area);
         self.draw_presets(frame, chunks[0]);
-        self.draw_filters(frame, chunks[1]);
+        self.draw_estudio_center(frame, chunks[1]);
         self.draw_voice(frame, chunks[2]);
     }
 
@@ -1413,40 +2162,100 @@ impl App {
         self.draw_button(frame, halves[1], "Borrar", Action::DeletePreset, !builtin);
     }
 
-    fn draw_filters(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    fn draw_estudio_center(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Filtros y audio ");
+            .title(" Controles de Estudio y Monitoreo ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if inner.height < 8 {
+        if inner.height < 10 {
             return;
         }
+
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
+                Constraint::Length(2), // Meters
+                Constraint::Length(1), // Spectrum
+                Constraint::Length(1), // Master Volume
+                Constraint::Length(1), // Preset Gain
+                Constraint::Length(1), // Mute & Bypass
+                Constraint::Length(1), // Sidetone
+                Constraint::Length(1), // Sidetone gain
+                Constraint::Length(1), // Loop Tester
+                Constraint::Length(1), // Noise reduction
+                Constraint::Length(1), // Noise strength
+                Constraint::Length(1), // Speaker Lock
+                Constraint::Length(2), // Speaker status
+                Constraint::Length(1), // Speaker profile actions
+                Constraint::Min(1),    // Latency info
             ])
             .split(inner);
+
+        // Meter VU bar
+        let in_ratio = db_to_ratio(self.state.input_peak_db);
+        let out_ratio = db_to_ratio(self.state.output_peak_db);
+        let meter_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(if self.state.input_peak_db > -3.0 {
+                    Color::Red
+                } else {
+                    Color::Green
+                }))
+                .ratio(in_ratio)
+                .label(format!("In: {:.1} dB", self.state.input_peak_db)),
+            meter_cols[0],
+        );
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(if self.state.output_peak_db > -3.0 {
+                    Color::Red
+                } else {
+                    Color::Cyan
+                }))
+                .ratio(out_ratio)
+                .label(format!("Out: {:.1} dB", self.state.output_peak_db)),
+            meter_cols[1],
+        );
+
+        // Real-time 8-band Spectrum Visualizer
+        let mut spectrum_spans = vec![Span::styled(
+            "Espectro: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        let band_labels = ["60", "150", "400", "1k", "2.5k", "5k", "8k", "14k"];
+        for (i, label) in band_labels.iter().enumerate() {
+            let db = self.state.spectrum_db.get(i).copied().unwrap_or(-60.0);
+            let bar = spark_bar(db);
+            let bar_color = if db > -6.0 {
+                Color::Red
+            } else if db > -18.0 {
+                Color::Yellow
+            } else if db > -35.0 {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            spectrum_spans.push(Span::raw(format!("{label}:")));
+            spectrum_spans.push(Span::styled(
+                format!("{bar} "),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spectrum_spans)), rows[1]);
+
         let Some(preset) = self.selected_or_active().cloned() else {
             return;
         };
 
+        // Master Volume
         self.draw_slider(
             frame,
-            rows[0],
+            rows[2],
             "Volumen maestro",
             self.master_edit,
             -24.0,
@@ -1454,10 +2263,12 @@ impl App {
             "dB",
             SliderKind::Master,
         );
+
+        // Preset Gain
         let preset_gain = preset.gain_db();
         self.draw_slider(
             frame,
-            rows[1],
+            rows[3],
             "Ganancia del preset",
             preset_gain,
             -24.0,
@@ -1465,29 +2276,109 @@ impl App {
             "dB",
             SliderKind::PresetGain,
         );
+
+        // Toggles: Mute & Bypass
+        let mute_bypass = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[4]);
         let mute_label = if self.state.muted {
-            "[x] Silenciar"
+            "[x] Silenciar (M)"
         } else {
-            "[ ] Silenciar"
+            "[ ] Silenciar (M)"
         };
         self.draw_toggle(
             frame,
-            rows[2],
+            mute_bypass[0],
             mute_label,
             Action::ToggleMute,
             self.state.muted,
         );
 
+        let bypass_label = if self.state.bypass {
+            "[x] DSP Bypass (B)"
+        } else {
+            "[ ] DSP Bypass (B)"
+        };
+        self.draw_toggle(
+            frame,
+            mute_bypass[1],
+            bypass_label,
+            Action::ToggleBypass,
+            self.state.bypass,
+        );
+
+        // Sidetone
+        let sidetone_label = if self.state.monitor_enabled {
+            "[x] Sidetone / Retorno auriculares (S)"
+        } else {
+            "[ ] Sidetone / Retorno auriculares (S)"
+        };
+        self.draw_toggle(
+            frame,
+            rows[5],
+            sidetone_label,
+            Action::ToggleMonitor,
+            self.state.monitor_enabled,
+        );
+
+        self.draw_slider(
+            frame,
+            rows[6],
+            "Volumen Sidetone",
+            self.state.monitor_gain_db,
+            -24.0,
+            12.0,
+            "dB",
+            SliderKind::MonitorGain,
+        );
+
+        // Voice Tester Loop
+        let tester_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(rows[7]);
+        let loop_text = match self.state.loop_test_state.as_str() {
+            "recording" => "● Grabando 8s...",
+            "looping" => "▶ Reproduciendo bucle",
+            _ => "Loop Tester: inactivo",
+        };
+        let loop_color = match self.state.loop_test_state.as_str() {
+            "recording" => Color::Red,
+            "looping" => Color::Green,
+            _ => Color::Gray,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                loop_text,
+                Style::default().fg(loop_color).add_modifier(Modifier::BOLD),
+            ))),
+            tester_cols[0],
+        );
+        let btn_label = if self.state.loop_test_state == "idle" {
+            "● Grabar 8s (L)"
+        } else {
+            "■ Detener bucle (L)"
+        };
+        self.draw_button(
+            frame,
+            tester_cols[1],
+            btn_label,
+            Action::ToggleLoopRecord,
+            true,
+        );
+
+        // RNNoise
         let nr = preset.noise_reduction();
         let nr_label = if nr.is_some() {
             "[x] Reducción de ruido (RNNoise)"
         } else {
             "[ ] Reducción de ruido (RNNoise)"
         };
-        self.draw_toggle(frame, rows[3], nr_label, Action::ToggleNoise, nr.is_some());
+        self.draw_toggle(frame, rows[8], nr_label, Action::ToggleNoise, nr.is_some());
         self.draw_slider(
             frame,
-            rows[4],
+            rows[9],
             "Intensidad NR",
             nr.unwrap_or(0.0),
             0.0,
@@ -1496,49 +2387,49 @@ impl App {
             SliderKind::Noise,
         );
 
+        // Speaker Lock
         let speaker = preset.speaker_lock();
         let speaker_label = if speaker.is_some() {
-            "[x] Solo mi voz"
+            "[x] Solo mi voz (CAM++)"
         } else {
-            "[ ] Solo mi voz"
+            "[ ] Solo mi voz (CAM++)"
         };
         self.draw_toggle(
             frame,
-            rows[5],
+            rows[10],
             speaker_label,
             Action::ToggleSpeaker,
             speaker.is_some(),
         );
-        let status = if let Some(lock) = &speaker {
-            format!(
-                "Perfil: {}\n{} · score {:.2} · VAD {} · objetivo {}",
-                if lock.profile.is_empty() {
-                    "(ninguno)"
-                } else {
-                    &lock.profile
-                },
-                self.state.speaker_status,
-                self.state.speaker_score,
-                if self.state.speaker_vad { "sí" } else { "no" },
-                if self.state.speaker_target {
-                    "abierto"
-                } else {
-                    "cerrado"
-                },
-            )
+
+        if speaker.is_some() {
+            self.draw_slider(
+                frame,
+                rows[11],
+                "Umbral coincidencia",
+                speaker.as_ref().map(|lock| lock.threshold).unwrap_or(0.72),
+                0.50,
+                0.99,
+                "",
+                SliderKind::Threshold,
+            );
         } else {
-            self.state.speaker_status.clone()
-        };
-        frame.render_widget(
-            Paragraph::new(status)
-                .style(Style::default().fg(Color::Gray))
-                .wrap(Wrap { trim: true }),
-            rows[6],
-        );
+            frame.render_widget(
+                Paragraph::new(self.state.speaker_status.clone())
+                    .style(Style::default().fg(Color::Gray))
+                    .wrap(Wrap { trim: true }),
+                rows[11],
+            );
+        }
+
         let profile_row = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-            .split(rows[7]);
+            .constraints([
+                Constraint::Percentage(44),
+                Constraint::Percentage(28),
+                Constraint::Percentage(28),
+            ])
+            .split(rows[12]);
         let profile_label = format!(
             "Perfil: {}",
             speaker
@@ -1562,52 +2453,15 @@ impl App {
         self.draw_button(
             frame,
             profile_row[1],
-            "Enrolar voz",
+            "Enrolar",
             Action::EnrollVoice,
             true,
-        );
-
-        self.draw_slider(
-            frame,
-            rows[8],
-            "Umbral de coincidencia",
-            speaker.as_ref().map(|lock| lock.threshold).unwrap_or(0.72),
-            0.50,
-            0.99,
-            "",
-            SliderKind::Threshold,
-        );
-        self.draw_slider(
-            frame,
-            rows[9],
-            "Retención de voz",
-            speaker
-                .as_ref()
-                .map(|lock| lock.hold_ms as f32)
-                .unwrap_or(300.0),
-            50.0,
-            1500.0,
-            "ms",
-            SliderKind::Hold,
-        );
-        self.draw_slider(
-            frame,
-            rows[10],
-            "Lookahead",
-            speaker
-                .as_ref()
-                .map(|lock| lock.lookahead_ms as f32)
-                .unwrap_or(100.0),
-            0.0,
-            300.0,
-            "ms",
-            SliderKind::Lookahead,
         );
         if !self.state.models_installed {
             self.draw_button(
                 frame,
-                rows[11],
-                "Instalar modelos de voz (~30 MB)",
+                profile_row[2],
+                "Modelos",
                 Action::InstallModels,
                 true,
             );
@@ -1617,25 +2471,509 @@ impl App {
                 .is_some_and(|lock| !lock.profile.trim().is_empty());
             self.draw_button(
                 frame,
-                rows[11],
-                "Borrar perfil de voz",
+                profile_row[2],
+                "Borrar",
                 Action::DeleteVoice,
                 has_profile,
             );
         }
+
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(format!(
+                "Latencia: base {:.1} + DSP {:.1} = {:.1} ms · Quantum {} · Xruns {}",
+                self.state.latency_ms,
+                self.state.dsp_latency_ms,
+                self.state.total_latency_ms,
+                self.state.quantum,
+                self.state.xruns
+            ))])
+            .style(Style::default().fg(Color::DarkGray)),
+            rows[13],
+        );
+    }
+
+    fn draw_voice_lab(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Voice Lab: {} ", self.state.active_preset_name));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height < 10 {
+            return;
+        }
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+
+        let Some(preset) = self.selected_or_active().cloned() else {
+            return;
+        };
+
+        // LEFT COLUMN: Pre-procesamiento y Dinámica (HPF, Gate, EQ, Compressor)
+        let left_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // HPF toggle
+                Constraint::Length(1), // HPF Cutoff
+                Constraint::Length(1), // Gate toggle
+                Constraint::Length(1), // Gate threshold
+                Constraint::Length(1), // Gate reduction status
+                Constraint::Length(1), // EQ toggle
+                Constraint::Length(1), // EQ Low
+                Constraint::Length(1), // EQ Mid
+                Constraint::Length(1), // EQ High
+                Constraint::Length(1), // Compressor toggle
+                Constraint::Length(1), // Comp threshold
+                Constraint::Length(1), // Comp ratio
+                Constraint::Length(1), // Comp makeup
+                Constraint::Min(1),    // Comp reduction status
+            ])
+            .split(cols[0]);
+
+        // HPF
+        let hpf = preset.high_pass();
+        self.draw_toggle(
+            frame,
+            left_rows[0],
+            if hpf.is_some() {
+                "[x] Filtro Paso Alto (HPF)"
+            } else {
+                "[ ] Filtro Paso Alto (HPF)"
+            },
+            Action::ToggleFilter("high_pass"),
+            hpf.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            left_rows[1],
+            "Corte HPF",
+            hpf.unwrap_or(80.0),
+            20.0,
+            300.0,
+            "Hz",
+            SliderKind::HpfCutoff,
+        );
+
+        // Noise Gate
+        let gate = preset.noise_gate();
+        self.draw_toggle(
+            frame,
+            left_rows[2],
+            if gate.is_some() {
+                "[x] Puerta de Ruido (Noise Gate)"
+            } else {
+                "[ ] Puerta de Ruido (Noise Gate)"
+            },
+            Action::ToggleFilter("noise_gate"),
+            gate.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            left_rows[3],
+            "Umbral Gate",
+            gate.as_ref().map(|g| g.threshold_db).unwrap_or(-45.0),
+            -60.0,
+            0.0,
+            "dB",
+            SliderKind::GateThreshold,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  Atenuación Gate: -{:.1} dB",
+                self.state.gate_reduction_db
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+            left_rows[4],
+        );
+
+        // 3-Band Parametric EQ
+        let eq = preset.equalizer();
+        self.draw_toggle(
+            frame,
+            left_rows[5],
+            if eq.is_some() {
+                "[x] Ecualizador 3-Bandas"
+            } else {
+                "[ ] Ecualizador 3-Bandas"
+            },
+            Action::ToggleFilter("equalizer"),
+            eq.is_some(),
+        );
+        let (low, mid, high) = eq.unwrap_or((0.0, 0.0, 0.0));
+        self.draw_slider(
+            frame,
+            left_rows[6],
+            "EQ Graves (100Hz)",
+            low,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqLow,
+        );
+        self.draw_slider(
+            frame,
+            left_rows[7],
+            "EQ Medios (1kHz)",
+            mid,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqMid,
+        );
+        self.draw_slider(
+            frame,
+            left_rows[8],
+            "EQ Agudos (8kHz)",
+            high,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqHigh,
+        );
+
+        // Compressor
+        let comp = preset.compressor();
+        self.draw_toggle(
+            frame,
+            left_rows[9],
+            if comp.is_some() {
+                "[x] Compresor de Estudio"
+            } else {
+                "[ ] Compresor de Estudio"
+            },
+            Action::ToggleFilter("compressor"),
+            comp.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            left_rows[10],
+            "Umbral Compresor",
+            comp.as_ref().map(|c| c.threshold_db).unwrap_or(-18.0),
+            -40.0,
+            0.0,
+            "dB",
+            SliderKind::CompThreshold,
+        );
+        self.draw_slider(
+            frame,
+            left_rows[11],
+            "Ratio Compresor",
+            comp.as_ref().map(|c| c.ratio).unwrap_or(3.0),
+            1.0,
+            10.0,
+            ":1",
+            SliderKind::CompRatio,
+        );
+        self.draw_slider(
+            frame,
+            left_rows[12],
+            "Ganancia Makeup",
+            comp.as_ref().map(|c| c.makeup_db).unwrap_or(2.0),
+            0.0,
+            24.0,
+            "dB",
+            SliderKind::CompMakeup,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  Reducción Compresor: -{:.1} dB",
+                self.state.comp_reduction_db
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+            left_rows[13],
+        );
+
+        // RIGHT COLUMN: Efectos de Carácter y Modulación (Robot, RingMod, Dist, Chorus, Reverb)
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Robotizer toggle
+                Constraint::Length(1), // Robotizer freq
+                Constraint::Length(1), // Robotizer mix
+                Constraint::Length(1), // RingMod toggle
+                Constraint::Length(1), // RingMod freq
+                Constraint::Length(1), // RingMod mix
+                Constraint::Length(1), // Distortion toggle
+                Constraint::Length(1), // Distortion drive
+                Constraint::Length(1), // Distortion mix
+                Constraint::Length(1), // Chorus toggle
+                Constraint::Length(1), // Chorus mix
+                Constraint::Length(1), // Reverb toggle
+                Constraint::Length(1), // Reverb room
+                Constraint::Min(1),    // Reverb mix
+            ])
+            .split(cols[1]);
+
+        // Robotizer
+        let robot = preset.robotizer();
+        self.draw_toggle(
+            frame,
+            right_rows[0],
+            if robot.is_some() {
+                "[x] Robotizador"
+            } else {
+                "[ ] Robotizador"
+            },
+            Action::ToggleFilter("robotizer"),
+            robot.is_some(),
+        );
+        let (rfreq, rmix) = robot.unwrap_or((80.0, 0.5));
+        self.draw_slider(
+            frame,
+            right_rows[1],
+            "Frecuencia Robot",
+            rfreq,
+            20.0,
+            500.0,
+            "Hz",
+            SliderKind::RobotFreq,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[2],
+            "Mezcla Robot",
+            rmix,
+            0.0,
+            1.0,
+            "",
+            SliderKind::RobotMix,
+        );
+
+        // Ring Modulator
+        let ring = preset.ring_mod();
+        self.draw_toggle(
+            frame,
+            right_rows[3],
+            if ring.is_some() {
+                "[x] Modulador en Anillo (Alien)"
+            } else {
+                "[ ] Modulador en Anillo (Alien)"
+            },
+            Action::ToggleFilter("ring_mod"),
+            ring.is_some(),
+        );
+        let (ring_f, ring_m) = ring.unwrap_or((240.0, 0.5));
+        self.draw_slider(
+            frame,
+            right_rows[4],
+            "Frecuencia Portadora",
+            ring_f,
+            50.0,
+            2000.0,
+            "Hz",
+            SliderKind::RingFreq,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[5],
+            "Mezcla Anillo",
+            ring_m,
+            0.0,
+            1.0,
+            "",
+            SliderKind::RingMix,
+        );
+
+        // Distortion
+        let dist = preset.distortion();
+        self.draw_toggle(
+            frame,
+            right_rows[6],
+            if dist.is_some() {
+                "[x] Distorsión / Saturación"
+            } else {
+                "[ ] Distorsión / Saturación"
+            },
+            Action::ToggleFilter("distortion"),
+            dist.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            right_rows[7],
+            "Drive Distorsión",
+            dist.as_ref().map(|d| d.drive).unwrap_or(6.0),
+            0.0,
+            24.0,
+            "dB",
+            SliderKind::DistDrive,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[8],
+            "Mezcla Distorsión",
+            dist.as_ref().map(|d| d.mix).unwrap_or(0.5),
+            0.0,
+            1.0,
+            "",
+            SliderKind::DistMix,
+        );
+
+        // Chorus
+        let chorus = preset.chorus();
+        self.draw_toggle(
+            frame,
+            right_rows[9],
+            if chorus.is_some() {
+                "[x] Chorus / Doubler"
+            } else {
+                "[ ] Chorus / Doubler"
+            },
+            Action::ToggleFilter("chorus"),
+            chorus.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            right_rows[10],
+            "Mezcla Chorus",
+            chorus.as_ref().map(|c| c.mix).unwrap_or(0.4),
+            0.0,
+            1.0,
+            "",
+            SliderKind::ChorusMix,
+        );
+
+        // Reverb
+        let reverb = preset.reverb();
+        self.draw_toggle(
+            frame,
+            right_rows[11],
+            if reverb.is_some() {
+                "[x] Reverberación de Sala"
+            } else {
+                "[ ] Reverberación de Sala"
+            },
+            Action::ToggleFilter("reverb"),
+            reverb.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            right_rows[12],
+            "Tamaño de Sala",
+            reverb.as_ref().map(|r| r.room_size).unwrap_or(0.6),
+            0.0,
+            1.0,
+            "",
+            SliderKind::ReverbRoom,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[13],
+            "Mezcla Reverb",
+            reverb.as_ref().map(|r| r.mix).unwrap_or(0.3),
+            0.0,
+            1.0,
+            "",
+            SliderKind::ReverbMix,
+        );
+    }
+
+    fn draw_soundboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Tablero de Sonidos (Soundboard) ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height < 6 {
+            return;
+        }
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // Active playback status
+                Constraint::Length(1), // Stop button
+                Constraint::Min(4),    // Sound list / grid
+                Constraint::Length(3), // Footer hints
+            ])
+            .split(inner);
+
+        // Active playback banner
+        let (status_text, status_color) = if let Some(active) = &self.state.active_sound_clip {
+            (
+                format!("▶ Reproduciendo: «{}» (Micrófono atenuado automáticamente -70%)", active),
+                Color::Green,
+            )
+        } else {
+            (
+                "■ En espera (Micrófono al 100%)".to_string(),
+                Color::DarkGray,
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                status_text,
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            ))),
+            rows[0],
+        );
+
+        // Stop all button
+        self.draw_button(
+            frame,
+            rows[1],
+            "■ Detener todos los sonidos (Espacio)",
+            Action::StopSounds,
+            true,
+        );
+
+        // Sound clips list
+        let clips = self.state.sound_clips.clone();
+        let capacity = rows[2].height as usize;
+        let start = self.selected_sound.saturating_sub(capacity.saturating_sub(1));
+        for (row, (index, clip)) in clips
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(capacity)
+            .enumerate()
+        {
+            let rect = Rect::new(rows[2].x, rows[2].y + row as u16, rows[2].width, 1);
+            let selected = index == self.selected_sound;
+            let is_playing = self.state.active_sound_clip.as_deref() == Some(&clip.id);
+            let hotkey = if index < 9 {
+                format!("[{}]", index + 1)
+            } else {
+                "   ".to_string()
+            };
+            let play_icon = if is_playing { "▶ " } else { "  " };
+
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_playing {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            let label = format!(
+                "{} {} {:<24} ({:.1}s) {}",
+                hotkey,
+                play_icon,
+                clip.name,
+                clip.duration_secs,
+                if clip.builtin { "· built-in" } else { "· audio" }
+            );
+
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, style))),
+                rect,
+            );
+            self.register(rect, Action::TriggerSound(clip.id.clone()));
+        }
+
+        // Footer hints
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(format!(
-                    "Latencia: base {:.1} + DSP {:.1} = {:.1} ms",
-                    self.state.latency_ms, self.state.dsp_latency_ms, self.state.total_latency_ms
-                )),
-                Line::from(format!(
-                    "Quantum {} · {} Hz · xruns {}",
-                    self.state.quantum, self.state.sample_rate, self.state.xruns
-                )),
+                Line::from("💡 Directorio de clips: ~/.local/share/mvx/sounds/ (archivos WAV estándar)"),
+                Line::from("   Atajos globales: 'mvx ctl sound <id>' para teclas rápidas en Hyprland / Sway / KDE"),
             ])
             .style(Style::default().fg(Color::DarkGray)),
-            rows[12],
+            rows[3],
         );
     }
 
@@ -1767,9 +3105,8 @@ impl App {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
-                Line::from("El pitch cambia la altura de la voz."),
-                Line::from("Los formantes cambian el tamaño aparente"),
-                Line::from("de la garganta sin mover el pitch."),
+                Line::from("El pitch altera el tono fundamental."),
+                Line::from("Los formantes cambian el timbre de garganta."),
                 Line::from(""),
                 Line::from("0 st en ambos = voz natural."),
             ])
@@ -1944,28 +3281,21 @@ impl App {
     fn draw_footer(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let help = Line::from(vec![
             Span::styled(" q/Esc ", key_style()),
-            Span::raw("salir  "),
-            Span::styled(" Tab ", key_style()),
-            Span::raw("sección  "),
-            Span::styled(
-                if self.mouse_active {
-                    " ratón "
-                } else {
-                    " teclado "
-                },
-                key_style(),
-            ),
-            Span::raw(if self.mouse_active {
-                "clic/rueda  "
-            } else {
-                "ratón no disponible  "
-            }),
-            Span::styled(" n ", key_style()),
-            Span::raw("nuevo  "),
-            Span::styled(" e ", key_style()),
-            Span::raw("enrolar  "),
+            Span::raw("salir "),
+            Span::styled(" 1-4/Tab ", key_style()),
+            Span::raw("pestañas "),
+            Span::styled(" m ", key_style()),
+            Span::raw("mute "),
+            Span::styled(" b ", key_style()),
+            Span::raw("bypass "),
             Span::styled(" s ", key_style()),
-            Span::raw("solo mi voz  "),
+            Span::raw("sidetone "),
+            Span::styled(" v ", key_style()),
+            Span::raw("mi voz "),
+            Span::styled(" l ", key_style()),
+            Span::raw("loop "),
+            Span::styled(" Espacio ", key_style()),
+            Span::raw("parar fx "),
             Span::styled(" +/- ", key_style()),
             Span::raw("volumen"),
         ]);
@@ -2044,7 +3374,8 @@ impl App {
         let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0) as f64;
         let label = match unit {
             "dB" | "st" => format!("{label}: {value:+.1} {unit}"),
-            "ms" => format!("{label}: {value:.0} {unit}"),
+            "Hz" | "ms" => format!("{label}: {value:.0} {unit}"),
+            ":1" => format!("{label}: {value:.1}:1"),
             _ => format!("{label}: {value:.2}"),
         };
         frame.render_widget(
@@ -2059,9 +3390,6 @@ impl App {
         self.register(area, Action::Slider(kind));
     }
 
-    /// A toggle is always clickable; `active` only changes its appearance.
-    /// Previously the checkbox state was passed as `enabled`, which made the
-    /// control impossible to turn on with the mouse when it was off.
     fn draw_toggle(
         &mut self,
         frame: &mut Frame<'_>,
@@ -2132,6 +3460,26 @@ fn db_to_ratio(db: f32) -> f64 {
     (((db + 60.0) / 60.0).clamp(0.0, 1.0)) as f64
 }
 
+fn spark_bar(db: f32) -> &'static str {
+    if db < -55.0 {
+        " "
+    } else if db < -45.0 {
+        "▂"
+    } else if db < -35.0 {
+        "▃"
+    } else if db < -25.0 {
+        "▄"
+    } else if db < -18.0 {
+        "▅"
+    } else if db < -12.0 {
+        "▆"
+    } else if db < -6.0 {
+        "▇"
+    } else {
+        "█"
+    }
+}
+
 fn models_command(action: ModelsAction) -> Result<()> {
     match action {
         ModelsAction::Install => {
@@ -2143,7 +3491,7 @@ fn models_command(action: ModelsAction) -> Result<()> {
                     mvx_core::models_dir().display()
                 ),
             }
-            println!("podés seguir el estado con `mxv status` o en la TUI.");
+            println!("podés seguir el estado con `mvx status` o en la TUI.");
             Ok(())
         }
         ModelsAction::Status => {
@@ -2213,7 +3561,7 @@ fn doctor() -> Result<()> {
                 if state.models_installed {
                     "instalados"
                 } else {
-                    "faltan; ejecutá `mxv models install`"
+                    "faltan; ejecutá `mvx models install`"
                 }
             );
             println!(
@@ -2247,17 +3595,4 @@ fn doctor() -> Result<()> {
             Ok(())
         }
     }
-}
-
-#[allow(dead_code)]
-fn _is_socket(path: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    path.metadata()
-        .map(|m| m.file_type().is_socket())
-        .unwrap_or(false)
-}
-
-#[allow(dead_code)]
-fn _io_context<T>(result: io::Result<T>) -> Result<T> {
-    result.context("operación de terminal falló")
 }
