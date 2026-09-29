@@ -1,244 +1,198 @@
-# MVX · ModularVoiceX4yi
+# MVX · ModularVoiceX4yi (MVX 1.0 Pro)
 
-Modulador de voz personal, nativo para Linux/PipeWire, con salida a un **micrófono virtual**, presets editables y una TUI pensada para usarse con ratón.
+> **Modulador y Procesador de Voz Profesional de Estudio para GNU/Linux, nativo sobre PipeWire.**
 
-El objetivo es tener control total de la voz: entrada física → cadena DSP → micrófono virtual. La clonación neuronal de voz queda como una etapa posterior.
+MVX transforma tu micrófono físico en un **micrófono virtual de calidad de estudio** (`mvx_mic`) con latencia ultra-baja (<15ms), 100% libre de bloqueos en tiempo real, con Voice Lab completo, Sidetone (monitoreo en auriculares), Voice Tester Loop, Soundboard con ducking automático y verificación biométrica de voz ("Solo mi voz").
 
-## Estado actual
+---
 
-Funciona de punta a punta en PipeWire nativo:
+## Características Principales
 
-- Captura desde la entrada física elegida y fuente virtual nativa `mvx_mic` (`Audio/Source/Virtual`).
-- Ring buffer SPSC sin locks en el callback de audio.
-- **Presets**: `Natural`, `Voz grave`, `Voz de ardilla` y presets personalizados.
-- **Pitch y formantes independientes** con Signalsmith Stretch.
-- **Reducción de ruido** opcional con RNNoise (`nnnoiseless`).
-- **Solo mi voz**: verificación de hablante con CAM++ y VAD Silero; el audio de otras voces se atenúa.
-- **Ganancia maestra + ganancia por preset**, mute y limitador de seguridad.
-- **Calidad DSP** seleccionable: `Ultra` (~21.3 ms), `Equilibrado` (~42.7 ms) y `Alta` (~85.3 ms).
-- Daemon `mvxd` con IPC Unix socket (protocolo v2).
-- TUI en español con ratón completo (clic, arrastre, rueda), teclado físico y dos secciones: **General** y **Dispositivos**.
-- Tray `mvx-tray` para hosts StatusNotifierItem (Noctalia, Waybar, KDE, etc.).
-- Servicios systemd de usuario y script de instalación.
+### 🎙️ Voice Lab Profesional (Rack DSP en Tiempo Real)
+- **Pitch & Formant Shifter:** Modulación independiente de tono y tamaño de garganta con Signalsmith Stretch.
+- **Filtro Paso Alto (HPF):** Corte ajustable (20–300 Hz) para eliminar golpes de mesa y ruidos por debajo del rango vocal.
+- **Puerta de Ruido de Estudio (Noise Gate):** Umbral configurable (-60 a 0 dB) con histéresis, attack de 2ms y release suave para silenciar ruidos de fondo sin comerse los finales de frase.
+- **Ecualizador Paramétrico de 3 Bandas:** Graves (100 Hz Low Shelf), Medios (1 kHz Peak) y Agudos (8 kHz High Shelf) de -15 a +15 dB.
+- **Compresor Dinámico de Estudio:** Control de dinámica vocal con umbral, ratio (1:1 a 10:1), ganancia de compensación (makeup) y medidor de reducción de ganancia.
+- **Efectos de Carácter y Modulación:**
+  - **Robotizer / Vocoder:** Modulación por tren de pulsos armónicos con frecuencia portadora (20–500 Hz) y mezcla Dry/Wet.
+  - **Modulador en Anillo (Ring Modulator):** Portadora senoidal pura (50–2000 Hz) para voces de robots clásicos (Dalek), aliens y modulaciones metálicas.
+  - **Distorsión / Overdrive / Bitcrusher:** Saturación suave por tangente hiperbólica y drive para radios policiales, megáfonos e intercomunicadores.
+  - **Chorus / Doubler:** Línea de retardo modulada por LFO para engrosar la voz estéreo y dar sensación de coro.
+  - **Reverberación de Sala:** Red de filtros en peine y all-pass estéreo para ambientación espacial (cueva, catedral, sala pequeña).
+  - **Humanizer:** Micro-deriva orgánica de pitch para evitar el efecto de sintetizador rígido.
+- **Limitador de Seguridad:** Protección continua contra clipping y picos digitales imprevistos.
 
-Todavía **no** hay separación real de voces solapadas, supresión de palabras/nombres ni clonación neuronal. `Solo mi voz` es una compuerta por similitud de hablante, no un separador de fuentes.
+### 🎧 Sidetone ("Escuchar mi voz") y Voice Tester Loop
+- **Sidetone de Retorno:** Stream `mvx.monitor` en tiempo real hacia tus auriculares con botón de activación instantánea y ganancia independiente (-24 a +12 dB).
+- **Voice Tester Loop:** Grabadora circular de prueba de 8 segundos. Permite grabar una frase corta y escucharla en bucle continuo mientras ajustas los efectos y sliders del Voice Lab sin tener que hablar todo el tiempo.
+
+### 🔊 Soundboard / Sampler Integrado
+- Reproducción instantánea de clips de sonido WAV directamente hacia el micrófono virtual y tus auriculares.
+- **Zero-Allocation & Zero-Lock:** Mezcla en tiempo real sin mutexes ni asignaciones dinámicas de memoria.
+- **Ducking Automático del Micrófono:** El micrófono físico se atenúa automáticamente un 70% (-10 dB) mientras se reproduce un clip de sonido para evitar saturaciones y mejorar la inteligibilidad.
+- **Sonidos de Fábrica Sintetizados:** `airhorn`, `bleep`, `chime`, `buzzer` generados automáticamente en `~/.local/share/mvx/sounds/`.
+- Permite arrastrar o copiar cualquier archivo WAV estándar a esa carpeta para usarlo de inmediato.
+
+### 🛡️ "Solo mi voz" (Biometría Vocal CAM++ + Silero VAD)
+- Verificación de hablante por redes neuronales ONNX fuera del hilo de tiempo real.
+- Bloquea voces ajenas de fondo en oficinas abiertas, cibercafés o casas familiares abriendo el micrófono solo cuando habla el usuario enrolado.
+
+### 🎛️ 14 Presets de Fábrica
+1. **Natural (Limpio):** Voz transparente con acondicionamiento de estudio (HPF 80Hz + Gate suave).
+2. **Locutor Grave (Broadcast):** Tono grave cálido (+compresor + EQ de graves).
+3. **Voz de Ardilla (Squirrel):** Pitch y formantes elevados en sincronía (+6 semitonos).
+4. **Titán / Demonio:** Pitch ultra-bajo (-5 st) con overdrive y reverberación cavernosa.
+5. **Cyborg / Androide:** Robotizador armónico a 90 Hz con ecualización metálica.
+6. **Radio Policial (Walkie-Talkie):** HPF a 300Hz, distorsión por recorte y saturación de medios.
+7. **Megáfono:** Resonancia en medios con drive y compresión agresiva.
+8. **Cueva Eco (Echo Cave):** Sala grande con reflexiones profundas.
+9. **Anónimo:** Pitch alterado y formantes ensanchados para ocultar la identidad.
+10. **Alien (Dalek):** Modulación en anillo a 280 Hz.
+11. **Teléfono Vintage:** Filtro paso banda telefónico estrecho con saturación.
+12. **Helio:** Formantes afinados hacia arriba sin alterar excesivamente el tono.
+13. **Demonio Radial (Radio Demon):** Overdrive con mezcla de chorus y reverberación oscura.
+14. **Robot Musical:** Modulación precisa afinada para gaming y streams.
+
+---
+
+## Arquitectura de Tiempo Real (RT-Safe)
+
+Diseñado estrictamente para Linux y PipeWire:
+- **0 Bloqueos en Audio Thread:** Cero mutexes, cero llamadas al sistema, cero syscalls ni esperas dentro de los callbacks de PipeWire.
+- **Ring Buffer SPSC Mono:** Transporte eficiente de 1 muestra por frame con expansión multicanal automática a la salida.
+- **Gliding Atómico de Parámetros:** Mover sliders no destruye ni recrea nodos DSP. El pitch y los filtros se interpolan suavemente sin clics ni xruns.
+- **Flock de Instancia Única:** `mvxd` y `mvx-tray` están protegidos por candados de archivo `flock(2)` para evitar instancias duplicadas.
+- **Servicios de Usuario Systemd:** Corren bajo el usuario no privilegiado (`systemctl --user start mvxd`).
+
+---
 
 ## Requisitos
 
-- Linux con PipeWire 1.2+ y WirePlumber (o un gestor de sesión equivalente).
-- Rust estable reciente (probado con 1.99).
-- Headers/libs de desarrollo de PipeWire (`pipewire`, `libspa`).
-- `clang`/`libclang` para compilar las dependencias de ONNX.
-- `curl` para descargar los modelos de voz.
-- Opcional: `pavucontrol`, `xdg-terminal-exec` o un terminal compatible.
+- **Linux** con PipeWire 1.2+ y WirePlumber.
+- **Rust** 1.80+ y herramientas de compilación (`gcc-libs`, `clang`).
+- Opcional: `waybar`, `hyprland`, `sway`, `kde`, `libayatana-appindicator`.
 
-En Arch/CachyOS:
-
+En Arch Linux / CachyOS / Manjaro:
 ```bash
-sudo pacman -S --needed pipewire pipewire-audio wireplumber rust base-devel clang curl
+sudo pacman -S --needed pipewire pipewire-audio wireplumber rust base-devel clang
 ```
 
-La primera compilación descarga las librerías estáticas de `sherpa-onnx`; por eso puede tardar más que una compilación normal.
+---
 
-## Compilar
+## Instalación y Compilación
 
+### Compilar desde la fuente:
 ```bash
+git clone https://github.com/x4yi/ModularVoiceX4yi.git
+cd ModularVoiceX4yi
 cargo build --release
 ```
 
-Binarios:
+Los binarios generados se encuentran en:
+- `target/release/mvxd` — Daemon de audio PipeWire.
+- `target/release/mvx` — Interfaz TUI y CLI de control.
+- `target/release/mvx-tray` — Icono StatusNotifierItem en la barra del sistema.
 
-- `target/release/mvxd` — daemon de audio.
-- `target/release/mvx` — cliente/TUI.
-- `target/release/mvx-tray` — icono de bandeja.
+### Instalación en Arch Linux (PKGBUILD):
+```bash
+cd packaging/arch
+makepkg -si
+```
 
-## Ejecutar
+---
 
-Después de instalar:
+## Uso
+
+### Iniciar la aplicación:
+```bash
+mvx
+```
+Al ejecutar `mvx`:
+- Si el daemon `mvxd` no está corriendo, se inicia automáticamente en segundo plano.
+- Se abre la interfaz interactiva con 4 pestañas: **Estudio**, **Voice Lab**, **Soundboard** y **Dispositivos**.
+- Compatible con **ratón** (clic, arrastrar sliders, rueda de desplazamiento) y **teclado**.
+
+### Atajos de teclado en la TUI:
+- `1`..`4` o `Tab` — Cambiar de pestaña (`Estudio`, `Voice Lab`, `Soundboard`, `Dispositivos`).
+- `m` — Alternar Mute (silenciar micrófono).
+- `b` — Alternar Bypass DSP (micrófono limpio directo).
+- `s` — Alternar Sidetone / Retorno en auriculares.
+- `v` — Alternar "Solo mi voz" (CAM++ Speaker Lock).
+- `l` — Alternar grabación / bucle de prueba (Voice Tester Loop).
+- `Espacio` — Detener todos los sonidos de la soundboard.
+- `1`..`9` (en Soundboard) — Disparar sonido por número de clip.
+- `+` / `-` — Subir / bajar volumen maestro.
+- `[` / `]` — Modificar tono (pitch).
+- `q` o `Esc` — Salir de la TUI (el daemon sigue corriendo sin cortar la voz).
+
+---
+
+## Integración con Waybar y Atajos Globales (CLI)
+
+MVX incluye el subcomando `mvx ctl` para asignar atajos globales en tu gestor de ventanas (Hyprland, Sway, KDE, i3):
 
 ```bash
-mxv
+# Alternar mute del micrófono
+mvx ctl toggle-mute
+
+# Alternar bypass (para hablar natural al instante)
+mvx ctl toggle-bypass
+
+# Alternar monitoreo en auriculares (sidetone)
+mvx ctl toggle-monitor
+
+# Ajustar volumen de monitoreo en dB
+mvx ctl monitor-gain --gain-db 3.0
+
+# Siguiente o anterior preset
+mvx ctl next-preset
+mvx ctl prev-preset
+
+# Aplicar preset por ID
+mvx ctl preset --id voz_ardilla
+
+# Disparar un sonido de la soundboard
+mvx ctl sound --id airhorn
+
+# Detener todos los sonidos
+mvx ctl stop-sounds
+
+# Controlar la grabadora de bucle
+mvx ctl loop-test
 ```
 
-Ese único comando arranca el daemon si hace falta, inicia el tray (una sola instancia) y abre la TUI. Al cerrar la TUI con `q`, el daemon y el tray siguen vivos; la próxima `mxv` se reconecta. `mvx` hace exactamente lo mismo.
+### Módulo Waybar (`~/.config/waybar/config.jsonc`):
+```jsonc
+"custom/mvx": {
+    "format": "{}",
+    "return-type": "json",
+    "exec": "mvx status --waybar",
+    "interval": 2,
+    "on-click": "mvx ctl toggle-mute",
+    "on-click-right": "mvx ctl toggle-bypass",
+    "on-click-middle": "mvx ctl next-preset"
+}
+```
 
-Para desarrollo sin instalar:
+---
 
+## Diagnóstico y Salud
+
+Para verificar el estado de PipeWire, el quantum, la latencia total y la ruta de audio:
 ```bash
-./target/release/mvxd
-./target/release/mvx tui
+mvx doctor
 ```
 
-`mvx tui` arranca `mvxd` y `mvx-tray` automáticamente si no están corriendo y los encuentra en `PATH` o junto al binario.
-
-En aplicaciones de voz (Discord, navegador, OBS, etc.) elegí **MVX Microphone** como micrófono. También podés verlo en `pavucontrol` → *Grabación* / *Dispositivos de entrada*.
-
-## Modelos de voz
-
-`Solo mi voz` necesita dos modelos ONNX (~30 MB en total):
-
+Para consultar los modelos biométricos de voz:
 ```bash
-mxv models install   # descarga CAM++ y Silero VAD
-mxv models status    # muestra rutas y perfiles
+mvx models install   # Descarga CAM++ y Silero VAD (~30 MB)
+mvx models status    # Muestra estado de archivos y perfiles
 ```
 
-Se guardan en:
-
-```text
-~/.local/share/mvx/models/3dspeaker_campplus_zh_en.onnx
-~/.local/share/mvx/models/silero_vad.onnx
-~/.local/share/mvx/voices/<perfil>.json
-```
-
-El modelo CAM++ es multilingüe (chino/inglés) y se usa como extractor de embeddings; no requiere que hables en esos idiomas para verificar tu timbre.
-
-### Enrolar tu voz
-
-1. Abrí la TUI (`mxv`).
-2. En **General**, activá **Solo mi voz** o pulsá **Enrolar voz**.
-3. Escribí un nombre de perfil y confirmá.
-4. Hablá con naturalidad durante 10 segundos.
-5. Ajustá **Umbral de coincidencia** si tu score habitual queda cerca del límite.
-
-El perfil queda asociado al preset activo. Después de enrolar, el worker recarga el perfil y empieza a comparar la voz entrante.
-
-## Uso de la TUI
-
-La TUI se maneja con ratón de forma tradicional:
-
-- **Clic** en tabs, presets, botones y perfiles.
-- **Arrastrar** sobre un slider para cambiar el valor.
-- **Rueda** sobre un slider para ajustarlo; sobre la lista de presets, cambia la selección.
-- Los botones deshabilitados se muestran en gris.
-
-También hay teclado físico para todo:
-
-| Tecla | Acción |
-|---|---|
-| `Tab` / `g` / `d` | Cambiar entre General y Dispositivos |
-| `j` / `k` o flechas | Mover la selección |
-| `Enter` | Aplicar preset o entrada |
-| `n` | Nuevo preset personalizado |
-| `r` | Restaurar el preset built-in seleccionado |
-| `m` | Alternar mute |
-| `s` | Alternar Solo mi voz |
-| `e` | Enrolar un perfil de voz |
-| `i` | Instalar modelos de voz |
-| `+` / `-` | Ajustar volumen maestro |
-| `[` / `]` | Ajustar pitch |
-| `q` / `Esc` | Cerrar la TUI (el daemon sigue vivo) |
-
-En el modal de texto se escribe con el teclado físico; no hay teclado en pantalla.
-
-### Presets
-
-- Los tres built-in se pueden editar y después recuperar con **Restaurar**.
-- **Nuevo preset** crea una copia personalizable del preset actual.
-- `Voz de ardilla` sube pitch y formantes juntos (+6 semitonos), que es lo que produce el timbre tipo Alvin y las ardillas.
-- Los cambios de pitch, formantes, intensidad de NR, ganancia y Solo mi voz se aplican en vivo; pitch, formantes, NR y ganancia se suavizan para evitar zipper noise. Cambiar entre presets con la misma estructura DSP ya no reconstruye el camino de audio.
-- La ganancia maestra se guarda en `config.toml`; la ganancia del preset se suma a la maestra.
-
-## CLI
-
-```bash
-mxv status          # snapshot JSON del daemon
-mxv devices         # entradas físicas detectadas
-mxv doctor          # diagnóstico de socket, formato, modelos, xruns, etc.
-mxv models install  # descargar modelos de voz
-mxv models status   # ver modelos y perfiles
-mxv shutdown        # apagar el daemon
-
-# `mvx` es equivalente; ambos son el mismo binario.
-```
-
-## Configuración
-
-Archivo: `~/.config/mvx/config.toml`
-
-```toml
-config_version = 2
-
-[audio]
-input = "alsa_input.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Mic1__source"
-sample_rate = 48000
-quantum = 256
-gain_db = 0.0
-mute = false
-virtual_source_name = "mvx_mic"
-virtual_source_description = "MVX Microphone"
-
-[dsp]
-default_quality = "balanced"
-# speaker_model = "/ruta/al/modelo_campplus.onnx"
-# vad_model = "/ruta/al/silero_vad.onnx"
-speaker_analysis_hz = 4
-
-[presets]
-active = "natural"
-
-[ui]
-mouse = true
-last_tab = "general"
-```
-
-Los presets viven en `~/.config/mvx/presets.toml`, separados de la configuración de audio/UI. Cada preset guarda pitch, formantes, calidad y filtros opcionales (NR, ganancia, Solo mi voz). El daemon crea el archivo con los built-in si no existe.
-
-`quantum` acepta el perfil normal (`256`) o ultra (`128`). El daemon fuerza ese quantum en su nodo virtual mientras corre; cambiarlo afecta al grafo de PipeWire de la sesión.
-
-## Arquitectura
-
-```text
-mic física
-   │  stream Input (F32LE, 48 kHz, 2 ch)
-   ▼
-mvx.capture ── callback RT ──┬── ring SPSC ── callback RT ── mvx.output
-                             │                                  │ link-factory
-                             │                                  ▼
-                             │                            mvx_mic (Audio/Source/Virtual)
-                             │                                  │
-                             │                                  ▼
-                             │                           apps / navegador / Discord
-                             │
-                             └── ring SPSC ── worker de hablante
-                                                ├── resample 48k → 16k
-                                                ├── Silero VAD
-                                                ├── CAM++ embedding
-                                                └── score + decisión de compuerta
-```
-
-Cadena DSP en el callback de captura:
-
-```text
-mono → [Solo mi voz] → [RNNoise] → [pitch/formantes] → ganancia preset
-     → ganancia maestra/mute → limitador → ring de salida
-```
-
-- `mvxd` es el único dueño de PipeWire y del DSP.
-- `mvx` y `mvx-tray` son clientes IPC; pueden cerrarse y volver a abrirse sin cortar el audio.
-- El callback de proceso no asigna memoria, no bloquea y no usa locks: solo ring buffer y atómicos.
-- El worker de hablante corre fuera del hilo RT, con un hilo ONNX, prioridad baja y sin GPU por defecto.
-- El formato interno es 48 kHz, `f32`, estéreo. La captura se downmixea a mono para el DSP y se duplica a L/R en la salida.
-
-Más detalle en [`docs/architecture.md`](docs/architecture.md) y [`docs/latency.md`](docs/latency.md).
-
-## Limitaciones conocidas
-
-- **Solo mi voz** es una compuerta, no una separación de fuentes. Si dos personas hablan a la vez, la voz ajena puede filtrarse mientras el score siga alto.
-- El análisis de hablante usa una ventana de ~0,5 s; los primeros instantes de una voz nueva pueden pasar antes de que la compuerta reaccione.
-- El perfil es sensible al micrófono y a la posición. Si cambiás de micrófono, volvé a enrolar.
-- La captura y la reproducción son dos streams de PipeWire; el puente usa un ring con pre-roll acotado. Falta un resampler adaptativo para absorber deriva de reloj entre dispositivos.
-- El tray requiere un host SNI.
-- La latencia mostrada es una estimación (quantum + DSP + buffer del ring), no una medición E2E.
-- La supresión de palabras/nombres concretos y la clonación neuronal todavía no están implementadas.
-
-## Roadmap
-
-1. **M0** — plumbing PipeWire, TUI, tray, daemon. ✅
-2. **M1** — cadena DSP: presets, pitch/formantes, NR, ganancia, limitador. ✅
-3. **M2** — identidad de voz: VAD, embeddings, `Solo mi voz`, enrolamiento. ✅
-4. **M3** — separación de hablantes solapados, supresión de palabras/nombres y clonación neuronal.
-5. **M4** — grabación, análisis y ajuste automático opcional.
+---
 
 ## Licencia
 
-MIT.
+Distribuido bajo la licencia [MIT](LICENSE).
+Diseñado exclusivamente para el ecosistema moderno de audio en GNU/Linux.

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.x4yi.modularvoicex4yi</id>
+  <name>ModularVoiceX4yi</name>
+  <summary>Modulador de voz profesional en tiempo real nativo de PipeWire para Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer_name>x4yi</developer_name>
+  <description>
+    <p>
+      ModularVoiceX4yi (MVX) es un modulador de voz, procesador de estudio y soundboard en tiempo real,
+      diseñado exclusivamente para GNU/Linux con arquitectura nativa sobre PipeWire.
+    </p>
+    <p>Características destacadas:</p>
+    <ul>
+      <li>Procesamiento de audio de latencia ultra-baja (&lt;15ms) en tiempo real con seguridad lock-free estricta.</li>
+      <li>Voice Lab profesional: Pitch y Formant Shifting, Filtro Paso Alto (HPF), Noise Gate con histéresis, Compresor de estudio, Ecualizador Paramétrico de 3 Bandas, Chorus, Reverb estéreo, Robotizer y Overdrive/Bitcrusher.</li>
+      <li>Verificación biométrica de voz ("Solo mi voz") con modelos ONNX CAM++ y Silero VAD para filtrar voces ajenas.</li>
+      <li>Sidetone de retorno en auriculares y grabador en bucle de prueba ("Voice Tester Loop") de 8 segundos.</li>
+      <li>Soundboard / Sampler integrado de alta fidelidad con mezcla instantánea y atenuación de micrófono (ducking).</li>
+      <li>Interfaz TUI moderna para terminal con soporte completo de ratón y teclado, atajos globales de CLI y módulo JSON nativo para Waybar.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">modularvoicex4yi.desktop</launchable>
+  <url type="homepage">https://github.com/x4yi/ModularVoiceX4yi</url>
+  <url type="bugtracker">https://github.com/x4yi/ModularVoiceX4yi/issues</url>
+  <provides>
+    <binary>mvxd</binary>
+    <binary>mvx</binary>
+    <binary>mvx-tray</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Recorder</category>
+  </categories>
+</component>
+

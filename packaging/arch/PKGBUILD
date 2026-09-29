@@ -1,0 +1,62 @@
+# Maintainer: x4yi
+pkgname=modularvoicex4yi
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Modulador de voz profesional en tiempo real nativo de PipeWire para Linux"
+arch=('x86_64')
+url="https://github.com/x4yi/ModularVoiceX4yi"
+license=('MIT')
+depends=('pipewire' 'gcc-libs' 'glibc')
+makedepends=('cargo' 'git' 'clang' 'pkg-config')
+optdepends=(
+    'onnxruntime: Aceleración de verificación de voz CAM++'
+    'libayatana-appindicator: Icono en la bandeja del sistema'
+    'waybar: Integración de estado en la barra de escritorio'
+)
+provides=('modularvoicex4yi' 'mvxd' 'mvx')
+conflicts=('modularvoicex4yi-git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu" 2>/dev/null || cargo fetch --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked --workspace
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --release --locked --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Binarios del sistema
+    install -Dm755 target/release/mvxd "$pkgdir/usr/bin/mvxd"
+    install -Dm755 target/release/mvx "$pkgdir/usr/bin/mvx"
+    install -Dm755 target/release/mvx-tray "$pkgdir/usr/bin/mvx-tray"
+
+    # Servicios de usuario de systemd
+    install -Dm644 packaging/systemd/mvxd.service "$pkgdir/usr/lib/systemd/user/mvxd.service"
+    install -Dm644 packaging/systemd/mvx-tray.service "$pkgdir/usr/lib/systemd/user/mvx-tray.service"
+
+    # Entrada de escritorio e icono Freedesktop
+    install -Dm644 packaging/desktop/modularvoicex4yi.desktop "$pkgdir/usr/share/applications/modularvoicex4yi.desktop"
+    install -Dm644 packaging/desktop/modularvoicex4yi.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/modularvoicex4yi.svg"
+
+    # Metainfo AppStream
+    install -Dm644 packaging/desktop/io.github.x4yi.modularvoicex4yi.metainfo.xml "$pkgdir/usr/share/metainfo/io.github.x4yi.modularvoicex4yi.metainfo.xml"
+
+    # Documentación
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+

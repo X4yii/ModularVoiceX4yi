@@ -1340,4 +1340,26 @@ mod tests {
         }
         assert_eq!(p.filters.len(), kinds.len());
     }
+
+    #[test]
+    fn backup_unreadable_file_creates_backup() {
+        let temp_dir = std::env::temp_dir().join(format!("mvx_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let corrupt_file = temp_dir.join("corrupt.toml");
+        std::fs::write(&corrupt_file, "this is [not valid toml !!!").unwrap();
+        crate::backup_unreadable_file(&corrupt_file);
+
+        let mut found_bak = false;
+        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("corrupt.toml.") && name.ends_with(".bak") {
+                    found_bak = true;
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(found_bak, "corrupted file backup should have been created");
+    }
 }

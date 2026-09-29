@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Name=ModularVoiceX4yi
+GenericName=Modulador de Voz PipeWire
+Comment=Modulador y procesador de voz profesional en tiempo real para Linux
+Exec=mvx
+Icon=modularvoicex4yi
+Terminal=true
+Categories=AudioVideo;Audio;Recorder;
+Keywords=voice;microphone;modulator;pipewire;audio;soundboard;sidetone;dsp;
+StartupNotify=true
+Actions=Bypass;Monitor;Mute;
+
+[Desktop Action Bypass]
+Name=Alternar Bypass DSP
+Exec=mvx ctl toggle-bypass
+
+[Desktop Action Monitor]
+Name=Alternar Sidetone / Retorno
+Exec=mvx ctl toggle-monitor
+
+[Desktop Action Mute]
+Name=Silenciar / Desilenciar
+Exec=mvx ctl toggle-mute
+

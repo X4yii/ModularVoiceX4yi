@@ -7,7 +7,7 @@ PartOf=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/mvxd
+ExecStart=/usr/bin/mvxd
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info

@@ -7,7 +7,7 @@ Wants=mvxd.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/mvx-tray
+ExecStart=/usr/bin/mvx-tray
 Restart=on-failure
 RestartSec=3
 
