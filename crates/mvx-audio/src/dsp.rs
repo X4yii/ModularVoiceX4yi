@@ -89,7 +89,7 @@ impl DspChain {
         let interval = params.quality.interval();
         let mut stretch = Stretch::new(1, block, interval);
         stretch.set_transpose_factor_semitones(params.pitch_semitones, Some(TONALITY_LIMIT));
-        stretch.set_formant_factor_semitones(params.formant_semitones, true);
+        stretch.set_formant_factor_semitones(params.formant_semitones, false);
 
         let gain_db = f32::from_bits(params.gain_db.load(Ordering::Relaxed));
         let gain_current = if params.mute.load(Ordering::Relaxed) {
@@ -219,6 +219,65 @@ impl DspChain {
         &self.last_metrics
     }
 
+    /// Update dynamic filter chain parameters in-place without restarting PipeWire.
+    pub fn update_preset_filters(&mut self, preset: &Preset) {
+        self.high_pass = preset
+            .high_pass()
+            .map(|cutoff| Biquad::high_pass(cutoff, SAMPLE_RATE, 0.707));
+
+        self.noise_gate = preset
+            .noise_gate()
+            .map(|g| NoiseGate::new(g.threshold_db, g.attack_ms, g.release_ms, SAMPLE_RATE));
+
+        let (eq_low, eq_mid, eq_high) = if let Some((low, mid, high)) = preset.equalizer() {
+            (
+                Some(Biquad::low_shelf(120.0, SAMPLE_RATE, low)),
+                Some(Biquad::peaking_eq(1800.0, SAMPLE_RATE, mid, 1.0)),
+                Some(Biquad::high_shelf(8000.0, SAMPLE_RATE, high)),
+            )
+        } else {
+            (None, None, None)
+        };
+        self.eq_low = eq_low;
+        self.eq_mid = eq_mid;
+        self.eq_high = eq_high;
+
+        self.compressor = preset.compressor().map(|c| {
+            Compressor::new(
+                c.threshold_db,
+                c.ratio,
+                c.attack_ms,
+                c.release_ms,
+                c.makeup_db,
+                SAMPLE_RATE,
+            )
+        });
+
+        self.chorus = preset.chorus().map(|c| {
+            Chorus::new(c.rate_hz, c.depth_ms, c.mix, SAMPLE_RATE)
+        });
+
+        self.robotizer = preset.robotizer().map(|(f, m)| {
+            Robotizer::new(f, m)
+        });
+
+        self.ring_mod = preset.ring_mod().map(|(f, m)| {
+            RingMod::new(f, m)
+        });
+
+        self.distortion = preset.distortion().map(|d| {
+            Distortion::new(d.drive, d.crush_bits, d.mix)
+        });
+
+        self.reverb = preset.reverb().map(|r| {
+            Reverb::new(r.room_size, r.damping, r.mix)
+        });
+
+        self.humanizer = preset.humanizer().map(|(d, r)| {
+            Humanizer::new(d, r)
+        });
+    }
+
     /// Process mono samples in place. `input` and `output` must have the same
     /// length. This is called from the realtime callback.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
@@ -298,7 +357,7 @@ impl DspChain {
             CONTROL_SMOOTH_SECONDS,
         );
         if (self.last_formant - previous_formant).abs() > 0.0001 {
-            self.stretch.set_formant_factor_semitones(self.last_formant, true);
+            self.stretch.set_formant_factor_semitones(self.last_formant, false);
         }
 
         let has_pitch_effect = effective_pitch.abs() > 0.001 || self.last_formant.abs() > 0.001;

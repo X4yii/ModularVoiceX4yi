@@ -167,6 +167,7 @@ struct Engine {
     active_sound_index: Arc<std::sync::atomic::AtomicI32>,
     active_sound_cursor: Arc<std::sync::atomic::AtomicUsize>,
     speaker: Option<SpeakerWorker>,
+    filter_producer: Option<Producer<Preset>>,
     last_retry: Instant,
     link_warned: bool,
     presets_dirty: bool,
@@ -215,6 +216,7 @@ struct CaptureData {
     loop_state: Arc<AtomicU32>,
     loop_buffer: Vec<f32>,
     loop_pos: usize,
+    filter_consumer: Consumer<Preset>,
     sounds: Arc<Vec<mvx_core::LoadedSound>>,
     active_sound_index: Arc<std::sync::atomic::AtomicI32>,
     active_sound_cursor: Arc<std::sync::atomic::AtomicUsize>,
@@ -400,6 +402,7 @@ impl Engine {
             active_sound_index,
             active_sound_cursor,
             speaker: None,
+            filter_producer: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
             presets_dirty: false,
@@ -490,7 +493,6 @@ impl Engine {
     fn needs_rebuild(&self, next: &Preset) -> bool {
         let old = &self.active_preset;
         old.quality != next.quality
-            || old.filters != next.filters
             || old.speaker_lock().is_some() != next.speaker_lock().is_some()
             || old
                 .speaker_lock()
@@ -533,6 +535,9 @@ impl Engine {
             self.shared.set_speaker_config(lock.threshold, lock.hold_ms);
         }
         self.update_gain_atomic();
+        if let Some(prod) = self.filter_producer.as_mut() {
+            let _ = prod.push(preset);
+        }
         if rebuild {
             self.rebuild_audio_path()?;
         }
@@ -829,6 +834,7 @@ impl Engine {
         self.capture = None;
         self.playback = None;
         self.monitor_playback = None;
+        self.filter_producer = None;
         self.speaker = None;
         self.links.clear();
         self.linked_ports.clear();
@@ -873,7 +879,10 @@ impl Engine {
         let (mon_producer, mon_consumer) = RingBuffer::new(RING_CAPACITY);
         self.playback = Some(self.create_playback(consumer)?);
         self.monitor_playback = Some(self.create_monitor(mon_consumer)?);
-        self.capture = Some(self.create_capture(producer, Some(mon_producer), speaker_producer)?);
+        let (capture, filter_producer) =
+            self.create_capture(producer, Some(mon_producer), speaker_producer)?;
+        self.capture = Some(capture);
+        self.filter_producer = Some(filter_producer);
         Ok(())
     }
 
@@ -898,7 +907,7 @@ impl Engine {
         producer: Producer<f32>,
         monitor_producer: Option<Producer<f32>>,
         speaker: Option<Producer<f32>>,
-    ) -> Result<Capture> {
+    ) -> Result<(Capture, Producer<Preset>)> {
         let stream =
             pw::stream::StreamRc::new(self.core.clone(), "mvx-capture", self.capture_props())
                 .context("no se pudo crear el stream de captura")?;
@@ -926,6 +935,8 @@ impl Engine {
             self.shared.set_speaker_status("desactivado");
         }
 
+        let (filter_producer, filter_consumer) = rtrb::RingBuffer::new(8);
+
         let data = CaptureData {
             producer,
             monitor_producer,
@@ -933,6 +944,7 @@ impl Engine {
             monitor_gain: self.monitor_gain.clone(),
             channels: CHANNELS as usize,
             dsp,
+            filter_consumer,
             mono: vec![0.0; 8_192],
             processed: vec![0.0; 8_192],
             speaker,
@@ -1057,6 +1069,10 @@ impl Engine {
                         }
                     }
 
+                    if let Ok(new_preset) = data.filter_consumer.pop() {
+                        data.dsp.update_preset_filters(&new_preset);
+                    }
+
                     data.dsp.process(
                         &data.mono[..chunk_frames],
                         &mut data.processed[..chunk_frames],
@@ -1126,10 +1142,13 @@ impl Engine {
                 | pw::stream::StreamFlags::RT_PROCESS,
         )?;
 
-        Ok(Capture {
-            _listener: listener,
-            _stream: stream,
-        })
+        Ok((
+            Capture {
+                _listener: listener,
+                _stream: stream,
+            },
+            filter_producer,
+        ))
     }
 
     fn create_monitor(&self, consumer: Consumer<f32>) -> Result<Playback> {
