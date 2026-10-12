@@ -28,10 +28,15 @@ pub enum Request {
     StopLoopTest,
     TriggerSound { id: String },
     StopSounds,
+    ResetConfig { target: ConfigResetTarget },
+    CloneVoiceValidate { audio_path: String },
+    CloneVoiceSave { session: mvx_core::VoiceCloneSession },
     InstallModels,
     Ping,
     Shutdown,
 }
+
+pub use mvx_core::ConfigResetTarget;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -170,6 +175,30 @@ impl Client {
 
     pub fn stop_loop_test(&mut self) -> anyhow::Result<()> {
         match self.request(&Request::StopLoopTest)? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn reset_config(&mut self, target: ConfigResetTarget) -> anyhow::Result<()> {
+        match self.request(&Request::ResetConfig { target })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn clone_voice_validate(&mut self, audio_path: String) -> anyhow::Result<()> {
+        match self.request(&Request::CloneVoiceValidate { audio_path })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
+    pub fn clone_voice_save(&mut self, session: mvx_core::VoiceCloneSession) -> anyhow::Result<()> {
+        match self.request(&Request::CloneVoiceSave { session })? {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!(message),
             other => anyhow::bail!("respuesta inesperada: {other:?}"),

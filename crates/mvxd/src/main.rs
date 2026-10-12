@@ -237,6 +237,24 @@ fn handle_client(
                     Err(_) => Response::error("el motor de audio no está disponible"),
                 }
             }
+            Request::ResetConfig { target } => {
+                match sender.send(AudioCommand::ResetConfig(target)) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::CloneVoiceValidate { audio_path } => {
+                match sender.send(AudioCommand::CloneVoiceValidate(audio_path)) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
+            Request::CloneVoiceSave { session } => {
+                match sender.send(AudioCommand::CloneVoiceSave(session)) {
+                    Ok(()) => Response::Ok,
+                    Err(_) => Response::error("el motor de audio no está disponible"),
+                }
+            }
             Request::InstallModels => {
                 if installing_models.swap(true, Ordering::Relaxed) {
                     Response::error("la descarga de modelos ya está en curso")

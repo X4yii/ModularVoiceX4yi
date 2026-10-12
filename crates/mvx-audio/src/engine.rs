@@ -44,6 +44,9 @@ pub enum AudioCommand {
     StopLoopTest,
     TriggerSound { id: String },
     StopSounds,
+    ResetConfig(mvx_core::ConfigResetTarget),
+    CloneVoiceValidate(String),
+    CloneVoiceSave(mvx_core::VoiceCloneSession),
     ReloadAudio,
     Rescan,
     Tick,
@@ -766,6 +769,56 @@ impl Engine {
             AudioCommand::StopSounds => {
                 self.active_sound_index.store(-1, Ordering::Relaxed);
                 self.shared.set_active_sound_clip(None);
+            }
+            AudioCommand::ResetConfig(target) => match target {
+                mvx_core::ConfigResetTarget::All => {
+                    self.config = Config::default();
+                    let _ = self.config.save();
+                    self.presets = PresetStore::default();
+                    self.presets.ensure_builtins();
+                    let _ = self.presets.save();
+                    self.shared.set_config(&self.config);
+                    self.shared.set_presets(self.presets.presets.clone());
+                    let default_preset = self.presets.presets[0].clone();
+                    let _ = self.apply_preset(default_preset, true);
+                    self.shared.set_error(None);
+                }
+                mvx_core::ConfigResetTarget::Audio => {
+                    self.config.audio = mvx_core::AudioConfig::default();
+                    let _ = self.config.save();
+                    self.shared.set_config(&self.config);
+                    let _ = self.rebuild_audio_path();
+                }
+                mvx_core::ConfigResetTarget::Presets => {
+                    self.presets = PresetStore::default();
+                    self.presets.ensure_builtins();
+                    let _ = self.presets.save();
+                    self.shared.set_presets(self.presets.presets.clone());
+                    let default_preset = self.presets.presets[0].clone();
+                    let _ = self.apply_preset(default_preset, false);
+                }
+                mvx_core::ConfigResetTarget::Dsp => {
+                    self.config.dsp = mvx_core::DspConfig::default();
+                    let _ = self.config.save();
+                    self.shared.set_config(&self.config);
+                }
+            },
+            AudioCommand::CloneVoiceValidate(path_str) => {
+                let mut session = mvx_core::VoiceCloneSession::default();
+                let path = std::path::Path::new(&path_str);
+                if let Err(e) = session.validate_source(path) {
+                    session.status = mvx_core::CloneStatus::Error;
+                    session.status_message = e.to_string();
+                }
+                self.shared.set_clone_session(&session);
+            }
+            AudioCommand::CloneVoiceSave(session) => {
+                let preset = session.to_preset();
+                let _ = self.presets.upsert(preset.clone());
+                self.mark_presets_dirty();
+                self.flush_presets(true);
+                self.shared.set_presets(self.presets.presets.clone());
+                let _ = self.apply_preset(preset, false);
             }
             AudioCommand::ReloadAudio => {
                 if let Err(err) = self.rebuild_audio_path() {

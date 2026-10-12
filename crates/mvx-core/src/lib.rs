@@ -7,8 +7,20 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+pub mod clone;
 pub mod presets;
 pub mod soundboard;
+
+pub use clone::{CloneStatus, VoiceCloneSession};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigResetTarget {
+    All,
+    Audio,
+    Presets,
+    Dsp,
+}
 
 pub use presets::{
     builtin_presets, ChorusConfig, CompressorConfig, DistortionConfig, FilterConfig,
@@ -160,6 +172,10 @@ pub struct Snapshot {
     pub voice_profiles: Vec<String>,
     pub models_installed: bool,
     pub devices: Vec<DeviceInfo>,
+    #[serde(default)]
+    pub config: Config,
+    #[serde(default)]
+    pub clone_session: VoiceCloneSession,
     pub error: Option<String>,
 }
 
@@ -271,6 +287,7 @@ impl SharedState {
         snap.quality = config.dsp.default_quality;
         snap.monitor_enabled = config.audio.monitor_enabled;
         snap.monitor_gain_db = config.audio.monitor_gain_db;
+        snap.config = config.clone();
         Self {
             inner: RwLock::new(snap),
             input_peak: AtomicU32::new(0.0f32.to_bits()),
@@ -365,6 +382,14 @@ impl SharedState {
 
     pub fn set_error(&self, error: Option<String>) {
         self.update(|s| s.error = error);
+    }
+
+    pub fn set_config(&self, config: &Config) {
+        self.update(|s| s.config = config.clone());
+    }
+
+    pub fn set_clone_session(&self, session: &VoiceCloneSession) {
+        self.update(|s| s.clone_session = session.clone());
     }
 
     pub fn set_gain(&self, gain_db: f32, muted: bool) {
