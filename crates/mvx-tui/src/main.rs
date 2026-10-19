@@ -17,8 +17,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 
+use mvx_core::clone::{CloneStatus, VoiceCloneSession};
 use mvx_core::presets::FilterConfig;
-use mvx_core::{socket_path, Preset, Quality, Snapshot};
+use mvx_core::{socket_path, ConfigResetTarget, Preset, Quality, Snapshot};
 use mvx_ipc::{Client, Request, Response};
 
 #[derive(Debug, Parser)]
@@ -30,53 +31,53 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    /// Open the interactive TUI.
+    /// Abrir la TUI interactiva.
     Tui,
-    /// Print one state snapshot (use --waybar for Waybar custom module JSON).
+    /// Imprimir snapshot del estado (usar --waybar para módulo Waybar JSON).
     Status {
-        /// Format as a single-line JSON for Waybar / Polybar module.
+        /// Formato JSON de una línea para barra de estado Waybar / Polybar.
         #[arg(long)]
         waybar: bool,
     },
-    /// Quick CLI control commands (toggle mute, bypass, monitor, presets, soundboard).
+    /// Comandos rápidos de control CLI (mute, bypass, monitor, presets, soundboard).
     Ctl {
         #[command(subcommand)]
         action: CtlAction,
     },
-    /// List available input devices.
+    /// Listar dispositivos de entrada físicos disponibles.
     Devices,
-    /// Diagnose the daemon and audio path.
+    /// Diagnosticar el daemon y la ruta de audio PipeWire.
     Doctor,
-    /// Manage speaker-verification models.
+    /// Administrar modelos neuronales (CAM++ y Silero VAD).
     Models {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Ask mvxd to exit.
+    /// Solicitar a mvxd que se apague de forma limpia.
     Shutdown,
 }
 
 #[derive(Debug, Subcommand)]
 enum CtlAction {
-    /// Toggle microphone mute.
+    /// Conmutar silenciado del micrófono.
     ToggleMute,
-    /// Toggle DSP bypass (clean microphone).
+    /// Conmutar bypass del DSP (micrófono limpio).
     ToggleBypass,
-    /// Toggle real-time Sidetone / monitor in headphones.
+    /// Conmutar Sidetone / retorno en auriculares en tiempo real.
     ToggleMonitor,
-    /// Set monitor volume (in dB).
+    /// Ajustar ganancia del retorno Sidetone (en dB).
     MonitorGain { gain_db: f32 },
-    /// Apply a voice preset by its ID.
+    /// Aplicar un preset de voz por su ID.
     Preset { id: String },
-    /// Switch to the next preset.
+    /// Pasar al siguiente preset.
     NextPreset,
-    /// Switch to the previous preset.
+    /// Pasar al preset anterior.
     PrevPreset,
-    /// Trigger a soundboard sound by its ID.
+    /// Reproducir clip de audio por su ID.
     Sound { id: String },
-    /// Stop all playing soundboard sounds.
+    /// Detener reproducción de clips.
     StopSounds,
-    /// Control the Voice Tester Loop (record, stop, toggle).
+    /// Controlar el Loop Tester (record, stop, toggle).
     LoopTest {
         #[arg(default_value = "toggle")]
         action: String,
@@ -85,9 +86,9 @@ enum CtlAction {
 
 #[derive(Debug, Subcommand)]
 enum ModelsAction {
-    /// Download the CAM++ speaker model and Silero VAD model.
+    /// Descargar modelo CAM++ y Silero VAD.
     Install,
-    /// Print the model file paths and verification status.
+    /// Imprimir rutas y estado de verificación de modelos.
     Status,
 }
 
@@ -142,7 +143,10 @@ fn main() -> Result<()> {
                 CtlAction::ToggleMonitor => {
                     let state = client.state()?;
                     client.set_monitor(!state.monitor_enabled, state.monitor_gain_db)?;
-                    println!("Sidetone / Monitor: {}", if !state.monitor_enabled { "activado" } else { "desactivado" });
+                    println!(
+                        "Sidetone / Retorno: {}",
+                        if !state.monitor_enabled { "activado" } else { "desactivado" }
+                    );
                 }
                 CtlAction::MonitorGain { gain_db } => {
                     let state = client.state()?;
@@ -156,7 +160,11 @@ fn main() -> Result<()> {
                 CtlAction::NextPreset => {
                     let state = client.state()?;
                     if !state.presets.is_empty() {
-                        let cur_idx = state.presets.iter().position(|p| p.id == state.active_preset).unwrap_or(0);
+                        let cur_idx = state
+                            .presets
+                            .iter()
+                            .position(|p| p.id == state.active_preset)
+                            .unwrap_or(0);
                         let next_idx = (cur_idx + 1) % state.presets.len();
                         let next_id = &state.presets[next_idx].id;
                         client.apply_preset(next_id.clone())?;
@@ -166,8 +174,16 @@ fn main() -> Result<()> {
                 CtlAction::PrevPreset => {
                     let state = client.state()?;
                     if !state.presets.is_empty() {
-                        let cur_idx = state.presets.iter().position(|p| p.id == state.active_preset).unwrap_or(0);
-                        let prev_idx = if cur_idx == 0 { state.presets.len() - 1 } else { cur_idx - 1 };
+                        let cur_idx = state
+                            .presets
+                            .iter()
+                            .position(|p| p.id == state.active_preset)
+                            .unwrap_or(0);
+                        let prev_idx = if cur_idx == 0 {
+                            state.presets.len() - 1
+                        } else {
+                            cur_idx - 1
+                        };
                         let prev_id = &state.presets[prev_idx].id;
                         client.apply_preset(prev_id.clone())?;
                         println!("Preset: {}", state.presets[prev_idx].name);
@@ -332,11 +348,11 @@ fn run_tui() -> Result<()> {
     match enable_mouse_capture() {
         Ok(()) => {
             app.mouse_active = true;
-            app.status = "ratón listo: clic, arrastrá o usá la rueda".into();
+            app.status = "Ratón listo: clic, arrastre o rueda para interactuar".into();
         }
         Err(err) => {
             app.mouse_active = false;
-            app.status = format!("ratón no disponible: {err}; usá el teclado");
+            app.status = format!("Ratón no disponible: {err}; navegá con teclado");
         }
     }
     let result = app.run(&mut terminal);
@@ -355,10 +371,11 @@ fn disable_mouse_capture() {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
-    Estudio,
-    VoiceLab,
-    Soundboard,
+    Perfiles,
+    Filtros,
     Dispositivos,
+    Clonacion,
+    Ajustes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +408,10 @@ enum SliderKind {
     DistMix,
     ReverbRoom,
     ReverbMix,
+    ClonePitch,
+    CloneFormant,
+    CloneBlend,
+    CloneDenoise,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -405,8 +426,6 @@ enum Action {
     ToggleBypass,
     ToggleMonitor,
     ToggleLoopRecord,
-    TriggerSound(String),
-    StopSounds,
     Slider(SliderKind),
     Quality(Quality),
     ToggleFilter(&'static str),
@@ -418,6 +437,15 @@ enum Action {
     InstallModels,
     Rescan,
     SelectDevice(usize),
+    // Reset Target
+    OpenResetConfirm(ConfigResetTarget),
+    // Voice Clone actions
+    OpenCloneFileInput,
+    StartCloneRecording,
+    TestCloneVoice,
+    OpenCloneSaveModal,
+    DiscardCloneSession,
+    // Modals
     ModalSubmit,
     ModalCancel,
 }
@@ -438,35 +466,67 @@ struct Drag {
 enum Modal {
     NewPreset { value: String },
     EnrollVoice { value: String },
+    ConfirmReset { target: ConfigResetTarget },
+    CloneFileInput { path: String },
+    CloneSaveName { name: String },
 }
 
 impl Modal {
     fn value(&self) -> &str {
         match self {
             Self::NewPreset { value } | Self::EnrollVoice { value } => value,
+            Self::CloneFileInput { path } => path,
+            Self::CloneSaveName { name } => name,
+            Self::ConfirmReset { .. } => "",
         }
     }
 
-    fn value_mut(&mut self) -> &mut String {
+    fn value_mut(&mut self) -> Option<&mut String> {
         match self {
-            Self::NewPreset { value } | Self::EnrollVoice { value } => value,
+            Self::NewPreset { value } | Self::EnrollVoice { value } => Some(value),
+            Self::CloneFileInput { path } => Some(path),
+            Self::CloneSaveName { name } => Some(name),
+            Self::ConfirmReset { .. } => None,
         }
     }
 
     fn title(&self) -> &'static str {
         match self {
-            Self::NewPreset { .. } => "Nuevo preset",
-            Self::EnrollVoice { .. } => "Enrolar mi voz",
+            Self::NewPreset { .. } => "Crear nuevo perfil de voz",
+            Self::EnrollVoice { .. } => "Enrolar mi voz (CAM++)",
+            Self::ConfirmReset { .. } => "Confirmación de restablecimiento",
+            Self::CloneFileInput { .. } => "Cargar muestra de voz para clonar",
+            Self::CloneSaveName { .. } => "Guardar voz clonada como perfil",
         }
     }
 
     fn hint(&self) -> &'static str {
         match self {
             Self::NewPreset { .. } => {
-                "Nombre del preset. Se crea una copia editable de los valores actuales."
+                "Ingresá el nombre del perfil. Se creará una copia editable de la configuración actual."
             }
             Self::EnrollVoice { .. } => {
-                "Nombre del perfil. Al confirmar, grabá 10 segundos de voz mirando al micrófono."
+                "Nombre del perfil de voz. Al confirmar, hablá 10s al micrófono para extraer el embedding."
+            }
+            Self::ConfirmReset { target } => match target {
+                ConfigResetTarget::All => {
+                    "¿Restablecer TODA la configuración de fábrica? (Audio, Presets y DSP)"
+                }
+                ConfigResetTarget::Audio => {
+                    "¿Restablecer la configuración de audio y conexión PipeWire por defecto?"
+                }
+                ConfigResetTarget::Presets => {
+                    "¿Restablecer todos los presets a los valores originales de fábrica?"
+                }
+                ConfigResetTarget::Dsp => {
+                    "¿Restablecer la cadena de efectos y filtros DSP por defecto?"
+                }
+            },
+            Self::CloneFileInput { .. } => {
+                "Escribí la ruta absoluta o relativa del archivo de voz (WAV, MP3, OGG o FLAC)."
+            }
+            Self::CloneSaveName { .. } => {
+                "Ingresá el nombre con el que se guardará el nuevo preset en tu biblioteca."
             }
         }
     }
@@ -483,7 +543,6 @@ struct App {
     master_dirty: bool,
     tab: Tab,
     selected_device: usize,
-    selected_sound: usize,
     status: String,
     last_poll: Instant,
     last_start: Instant,
@@ -495,6 +554,7 @@ struct App {
     hover: Option<Rect>,
     mouse_active: bool,
     modal: Option<Modal>,
+    clone_session: VoiceCloneSession,
 }
 
 impl App {
@@ -508,10 +568,9 @@ impl App {
             last_send: Instant::now() - Duration::from_secs(5),
             master_edit: 0.0,
             master_dirty: false,
-            tab: Tab::Estudio,
+            tab: Tab::Perfiles,
             selected_device: 0,
-            selected_sound: 0,
-            status: "conectando…".into(),
+            status: "Conectando al daemon PipeWire…".into(),
             last_poll: Instant::now() - Duration::from_secs(10),
             last_start: Instant::now() - Duration::from_secs(10),
             last_edit: Instant::now() - Duration::from_secs(5),
@@ -522,6 +581,7 @@ impl App {
             hover: None,
             mouse_active: false,
             modal: None,
+            clone_session: VoiceCloneSession::default(),
         }
     }
 
@@ -568,7 +628,7 @@ impl App {
             }
             Err(err) => {
                 self.mouse_active = false;
-                self.status = format!("ratón no disponible: {err}; usá el teclado");
+                self.status = format!("Ratón no disponible: {err}; usá el teclado");
             }
         }
     }
@@ -591,14 +651,15 @@ impl App {
                         .position(|d| Some(d.name.as_str()) == state.selected_input.as_deref())
                         .unwrap_or(0);
                     self.master_edit = state.gain_db;
+                    self.clone_session = state.clone_session.clone();
                     self.state = state;
                 }
-                self.status = "conectado a mvxd".into();
+                self.status = "Conectado a mvxd (PipeWire nativo)".into();
                 self.client = Some(client);
                 self.ensure_tray();
             }
             Err(err) => {
-                self.status = format!("sin daemon: {err}");
+                self.status = format!("Esperando daemon: {err}");
             }
         }
     }
@@ -609,7 +670,7 @@ impl App {
         }
         self.tray_checked = true;
         if let Err(err) = start_tray() {
-            self.status = format!("tray no iniciado: {err}");
+            self.status = format!("Tray no iniciado: {err}");
         }
     }
 
@@ -629,9 +690,6 @@ impl App {
                 }
                 if self.selected_device >= self.state.devices.len() {
                     self.selected_device = self.state.devices.len().saturating_sub(1);
-                }
-                if self.selected_sound >= self.state.sound_clips.len() {
-                    self.selected_sound = self.state.sound_clips.len().saturating_sub(1);
                 }
                 if !self.master_dirty {
                     self.master_edit = self.state.gain_db;
@@ -665,7 +723,7 @@ impl App {
             }
             Err(err) => {
                 self.client = None;
-                self.status = format!("daemon desconectado: {err}");
+                self.status = format!("Daemon desconectado: {err}");
             }
         }
     }
@@ -751,7 +809,7 @@ impl App {
 
     fn send(&mut self, request: Request) {
         let Some(client) = self.client.as_mut() else {
-            self.status = "sin daemon".into();
+            self.status = "Sin daemon".into();
             return;
         };
         match client.request(&request) {
@@ -759,7 +817,7 @@ impl App {
             Ok(_) => {}
             Err(err) => {
                 self.client = None;
-                self.status = format!("error IPC: {err}");
+                self.status = format!("Error IPC: {err}");
             }
         }
     }
@@ -773,75 +831,57 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab => {
                 self.tab = match self.tab {
-                    Tab::Estudio => Tab::VoiceLab,
-                    Tab::VoiceLab => Tab::Soundboard,
-                    Tab::Soundboard => Tab::Dispositivos,
-                    Tab::Dispositivos => Tab::Estudio,
+                    Tab::Perfiles => Tab::Filtros,
+                    Tab::Filtros => Tab::Dispositivos,
+                    Tab::Dispositivos => Tab::Clonacion,
+                    Tab::Clonacion => Tab::Ajustes,
+                    Tab::Ajustes => Tab::Perfiles,
                 };
             }
             KeyCode::BackTab => {
                 self.tab = match self.tab {
-                    Tab::Estudio => Tab::Dispositivos,
-                    Tab::VoiceLab => Tab::Estudio,
-                    Tab::Soundboard => Tab::VoiceLab,
-                    Tab::Dispositivos => Tab::Soundboard,
+                    Tab::Perfiles => Tab::Ajustes,
+                    Tab::Filtros => Tab::Perfiles,
+                    Tab::Dispositivos => Tab::Filtros,
+                    Tab::Clonacion => Tab::Dispositivos,
+                    Tab::Ajustes => Tab::Clonacion,
                 };
             }
-            KeyCode::F(1) => self.tab = Tab::Estudio,
-            KeyCode::F(2) => self.tab = Tab::VoiceLab,
-            KeyCode::F(3) => self.tab = Tab::Soundboard,
-            KeyCode::F(4) => self.tab = Tab::Dispositivos,
-
-            KeyCode::Char('1') if self.tab != Tab::Soundboard => self.tab = Tab::Estudio,
-            KeyCode::Char('2') if self.tab != Tab::Soundboard => self.tab = Tab::VoiceLab,
-            KeyCode::Char('3') if self.tab != Tab::Soundboard => self.tab = Tab::Soundboard,
-            KeyCode::Char('4') if self.tab != Tab::Soundboard => self.tab = Tab::Dispositivos,
-
-            KeyCode::Char(c @ '1'..='9') if self.tab == Tab::Soundboard => {
-                let idx = (c as u8 - b'1') as usize;
-                if let Some(clip) = self.state.sound_clips.get(idx) {
-                    let id = clip.id.clone();
-                    self.send(Request::TriggerSound { id: id.clone() });
-                    self.status = format!("reproduciendo: {id}");
-                }
-            }
+            KeyCode::F(1) | KeyCode::Char('1') => self.tab = Tab::Perfiles,
+            KeyCode::F(2) | KeyCode::Char('2') => self.tab = Tab::Filtros,
+            KeyCode::F(3) | KeyCode::Char('3') => self.tab = Tab::Dispositivos,
+            KeyCode::F(4) | KeyCode::Char('4') => self.tab = Tab::Clonacion,
+            KeyCode::F(5) | KeyCode::Char('5') => self.tab = Tab::Ajustes,
 
             KeyCode::Up | KeyCode::Char('k') => match self.tab {
-                Tab::Estudio | Tab::VoiceLab => self.move_preset(-1),
-                Tab::Soundboard => self.move_sound(-1),
+                Tab::Perfiles | Tab::Filtros => self.move_preset(-1),
                 Tab::Dispositivos => {
                     self.selected_device = self.selected_device.saturating_sub(1);
                 }
+                _ => {}
             },
             KeyCode::Down | KeyCode::Char('j') => match self.tab {
-                Tab::Estudio | Tab::VoiceLab => self.move_preset(1),
-                Tab::Soundboard => self.move_sound(1),
+                Tab::Perfiles | Tab::Filtros => self.move_preset(1),
                 Tab::Dispositivos => {
                     if !self.state.devices.is_empty() {
                         self.selected_device =
                             (self.selected_device + 1).min(self.state.devices.len() - 1);
                     }
                 }
+                _ => {}
             },
             KeyCode::Enter => match self.tab {
-                Tab::Estudio | Tab::VoiceLab => self.apply_selected(),
-                Tab::Soundboard => {
-                    if let Some(clip) = self.state.sound_clips.get(self.selected_sound) {
-                        let id = clip.id.clone();
-                        self.send(Request::TriggerSound { id: id.clone() });
-                        self.status = format!("reproduciendo: {id}");
-                    }
-                }
+                Tab::Perfiles | Tab::Filtros => self.apply_selected(),
                 Tab::Dispositivos => self.select_device(self.selected_device),
+                _ => {}
             },
-            KeyCode::Char(' ') => self.stop_sounds(),
-            KeyCode::Char('n') => self.open_new_preset(),
-            KeyCode::Char('r') => self.reset_selected(),
+            KeyCode::Char('s') => self.toggle_monitor(),
             KeyCode::Char('m') => self.toggle_mute(),
             KeyCode::Char('b') => self.toggle_bypass(),
-            KeyCode::Char('s') => self.toggle_monitor(),
-            KeyCode::Char('v') => self.toggle_speaker(),
             KeyCode::Char('l') => self.toggle_loop_test(),
+            KeyCode::Char('n') => self.open_new_preset(),
+            KeyCode::Char('r') => self.reset_selected(),
+            KeyCode::Char('d') => self.delete_selected(),
             KeyCode::Char('e') => self.open_enroll(),
             KeyCode::Char('i') => self.install_models(),
             KeyCode::Char('+') | KeyCode::Char('=') => self.bump_master(1.0),
@@ -858,13 +898,17 @@ impl App {
             KeyCode::Enter => self.submit_modal(),
             KeyCode::Backspace => {
                 if let Some(modal) = self.modal.as_mut() {
-                    modal.value_mut().pop();
+                    if let Some(val) = modal.value_mut() {
+                        val.pop();
+                    }
                 }
             }
             KeyCode::Char(c) => {
                 if let Some(modal) = self.modal.as_mut() {
-                    if modal.value().len() < 64 {
-                        modal.value_mut().push(c);
+                    if let Some(val) = modal.value_mut() {
+                        if val.len() < 128 {
+                            val.push(c);
+                        }
                     }
                 }
             }
@@ -873,20 +917,16 @@ impl App {
     }
 
     fn submit_modal(&mut self) {
-        let value = self
-            .modal
-            .as_ref()
-            .map(|modal| modal.value().trim().to_string())
-            .unwrap_or_default();
-        if value.is_empty() {
-            self.status = "el nombre no puede estar vacío".into();
-            return;
-        }
         let Some(modal) = self.modal.take() else {
             return;
         };
         match modal {
-            Modal::NewPreset { .. } => {
+            Modal::NewPreset { value } => {
+                let val = value.trim();
+                if val.is_empty() {
+                    self.status = "El nombre no puede estar vacío".into();
+                    return;
+                }
                 let base = self
                     .selected_or_active()
                     .cloned()
@@ -894,7 +934,7 @@ impl App {
                 let id = self.next_custom_id();
                 let mut preset = base;
                 preset.id = id;
-                preset.name = value;
+                preset.name = val.to_string();
                 preset.builtin = false;
                 self.selected_preset = preset.id.clone();
                 self.draft = Some(preset.clone());
@@ -903,17 +943,22 @@ impl App {
                     preset,
                     activate: true,
                 });
-                self.status = "preset personalizado creado".into();
+                self.status = format!("Perfil creado: {val}");
             }
-            Modal::EnrollVoice { .. } => {
-                let Some(mut preset) = self.selected_or_active().cloned() else {
-                    self.status = "no hay un preset activo".into();
-                    return;
-                };
-                if let Err(err) = mvx_core::validate_profile_name(&value) {
-                    self.status = format!("nombre de perfil inválido: {err}");
+            Modal::EnrollVoice { value } => {
+                let val = value.trim();
+                if val.is_empty() {
+                    self.status = "El nombre no puede estar vacío".into();
                     return;
                 }
+                if let Err(err) = mvx_core::validate_profile_name(val) {
+                    self.status = format!("Nombre de perfil inválido: {err}");
+                    return;
+                }
+                let Some(mut preset) = self.selected_or_active().cloned() else {
+                    self.status = "No hay un preset activo".into();
+                    return;
+                };
                 if !preset.has_filter("speaker_lock") {
                     preset.add_filter("speaker_lock");
                 }
@@ -923,7 +968,7 @@ impl App {
                     } = filter
                     {
                         *enabled = true;
-                        *profile = value.clone();
+                        *profile = val.to_string();
                     }
                 });
                 self.selected_preset = preset.id.clone();
@@ -934,10 +979,44 @@ impl App {
                     activate: true,
                 });
                 self.send(Request::EnrollVoice {
-                    name: value,
+                    name: val.to_string(),
                     seconds: 10,
                 });
-                self.status = "enrolamiento iniciado (10s)".into();
+                self.status = format!("Enrolamiento de voz iniciado (10s): {val}");
+            }
+            Modal::ConfirmReset { target } => {
+                self.execute_reset(target);
+            }
+            Modal::CloneFileInput { path } => {
+                let p = PathBuf::from(path.trim());
+                if let Err(err) = self.clone_session.validate_source(&p) {
+                    self.status = format!("Error al cargar audio: {err}");
+                } else {
+                    self.status = format!("Muestra lista: {}", p.display());
+                    if let Some(client) = self.client.as_mut() {
+                        let _ = client.clone_voice_validate(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+            Modal::CloneSaveName { name } => {
+                let val = name.trim();
+                if val.is_empty() {
+                    self.status = "El nombre no puede estar vacío".into();
+                    return;
+                }
+                self.clone_session.name = val.to_string();
+                let preset = self.clone_session.to_preset();
+                let session = self.clone_session.clone();
+                self.selected_preset = preset.id.clone();
+                self.draft = Some(preset.clone());
+                self.send(Request::UpsertPreset {
+                    preset,
+                    activate: true,
+                });
+                if let Some(client) = self.client.as_mut() {
+                    let _ = client.clone_voice_save(session);
+                }
+                self.status = format!("Voz clonada guardada como perfil: {val}");
             }
         }
     }
@@ -995,14 +1074,8 @@ impl App {
                             -1.0
                         };
                         self.adjust_slider(kind, delta);
-                    } else if matches!(self.tab, Tab::Estudio | Tab::VoiceLab) {
+                    } else if matches!(self.tab, Tab::Perfiles | Tab::Filtros) {
                         self.move_preset(if mouse.kind == MouseEventKind::ScrollUp {
-                            -1
-                        } else {
-                            1
-                        });
-                    } else if self.tab == Tab::Soundboard {
-                        self.move_sound(if mouse.kind == MouseEventKind::ScrollUp {
                             -1
                         } else {
                             1
@@ -1040,7 +1113,7 @@ impl App {
                     .cloned();
                 self.needs_send = false;
                 self.send(Request::ApplyPreset { id: id.clone() });
-                self.status = format!("preset: {id}");
+                self.status = format!("Perfil seleccionado: {id}");
             }
             Action::ApplyPreset => self.apply_selected(),
             Action::NewPreset => {
@@ -1059,17 +1132,12 @@ impl App {
             Action::ToggleBypass => self.toggle_bypass(),
             Action::ToggleMonitor => self.toggle_monitor(),
             Action::ToggleLoopRecord => self.toggle_loop_test(),
-            Action::TriggerSound(id) => {
-                self.send(Request::TriggerSound { id: id.clone() });
-                self.status = format!("reproduciendo: {id}");
-            }
-            Action::StopSounds => self.stop_sounds(),
             Action::Slider(kind) => {
                 self.adjust_slider(kind, 0.0);
             }
             Action::Quality(quality) => {
                 self.edit_selected(|preset| preset.quality = quality);
-                self.status = format!("calidad DSP: {}", quality.label());
+                self.status = format!("Calidad DSP configurada a: {}", quality.label());
             }
             Action::ToggleFilter(kind) => {
                 self.edit_selected(|preset| {
@@ -1093,12 +1161,60 @@ impl App {
             Action::InstallModels => self.install_models(),
             Action::Rescan => {
                 self.send(Request::GetState);
-                self.status = "dispositivos actualizados".into();
+                self.status = "Lista de dispositivos PipeWire actualizada".into();
             }
             Action::SelectDevice(index) => self.select_device(index),
+            Action::OpenResetConfirm(target) => {
+                self.modal = Some(Modal::ConfirmReset { target });
+            }
+            Action::OpenCloneFileInput => {
+                self.modal = Some(Modal::CloneFileInput {
+                    path: String::new(),
+                });
+            }
+            Action::StartCloneRecording => {
+                self.send(Request::StartLoopRecord);
+                self.clone_session.status = CloneStatus::Validating;
+                self.clone_session.status_message =
+                    "Grabando muestra de 8-15s en micrófono...".into();
+                self.status = "Grabando muestra de voz para inferencia...".into();
+            }
+            Action::TestCloneVoice => {
+                let mut temp = self.clone_session.to_preset();
+                temp.id = "temp_clone_test".into();
+                temp.name = "Test Clonación IA".into();
+                self.send(Request::UpsertPreset {
+                    preset: temp,
+                    activate: true,
+                });
+                self.send(Request::StartLoopRecord);
+                self.status = "Reproduciendo muestra clonada en Loop Tester".into();
+            }
+            Action::OpenCloneSaveModal => {
+                self.modal = Some(Modal::CloneSaveName {
+                    name: self.clone_session.name.clone(),
+                });
+            }
+            Action::DiscardCloneSession => {
+                self.clone_session = VoiceCloneSession::default();
+                self.status = "Sesión de clonación descartada".into();
+            }
             Action::ModalSubmit => self.submit_modal(),
             Action::ModalCancel => self.modal = None,
         }
+    }
+
+    fn execute_reset(&mut self, target: ConfigResetTarget) {
+        if let Some(client) = self.client.as_mut() {
+            let _ = client.reset_config(target);
+        }
+        self.draft = None;
+        self.status = match target {
+            ConfigResetTarget::All => "Configuración completa de fábrica restablecida".into(),
+            ConfigResetTarget::Audio => "Parámetros de audio y PipeWire restablecidos".into(),
+            ConfigResetTarget::Presets => "Presets originales de fábrica restaurados".into(),
+            ConfigResetTarget::Dsp => "Efectos y filtros DSP restablecidos".into(),
+        };
     }
 
     fn apply_slider(&mut self, kind: SliderKind, rect: Rect, x: u16) {
@@ -1190,7 +1306,7 @@ impl App {
                 self.edit_selected(|preset| preset.pitch_semitones = (value * 10.0).round() / 10.0);
             }
             SliderKind::Formant => {
-                let value = -6.0 + rel * 12.0;
+                let value = -12.0 + rel * 24.0;
                 self.edit_selected(|preset| {
                     preset.formant_semitones = (value * 10.0).round() / 10.0
                 });
@@ -1465,224 +1581,59 @@ impl App {
                     });
                 });
             }
+            SliderKind::ClonePitch => {
+                self.clone_session.pitch_offset = (-12.0 + rel * 24.0).clamp(-12.0, 12.0);
+            }
+            SliderKind::CloneFormant => {
+                self.clone_session.formant_offset = (-12.0 + rel * 24.0).clamp(-12.0, 12.0);
+            }
+            SliderKind::CloneBlend => {
+                self.clone_session.similarity_blend = rel.clamp(0.0, 1.0);
+            }
+            SliderKind::CloneDenoise => {
+                self.clone_session.denoise_strength = rel.clamp(0.0, 1.0);
+            }
         }
     }
 
-    fn adjust_slider(&mut self, kind: SliderKind, direction: f32) {
+    fn adjust_slider(&mut self, kind: SliderKind, delta: f32) {
         match kind {
-            SliderKind::Master => self.bump_master(direction),
-            SliderKind::PresetGain => self.bump_preset_gain(direction),
+            SliderKind::Master => self.bump_master(delta),
+            SliderKind::PresetGain => self.bump_preset_gain(delta),
             SliderKind::MonitorGain => {
-                let val = (self.state.monitor_gain_db + direction * 1.0).clamp(-24.0, 12.0);
+                let cur = self.state.monitor_gain_db;
+                let val = (cur + delta).clamp(-24.0, 12.0);
+                let enabled = self.state.monitor_enabled;
                 self.send(Request::SetMonitor {
-                    enabled: self.state.monitor_enabled,
+                    enabled,
                     gain_db: val,
                 });
             }
-            SliderKind::Noise => self.edit_selected(|preset| {
-                if let Some(FilterConfig::NoiseReduction { strength, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::NoiseReduction { .. }))
-                {
-                    *strength = (*strength + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::Threshold => self.edit_selected(|preset| {
-                if let Some(FilterConfig::SpeakerLock { threshold, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::SpeakerLock { .. }))
-                {
-                    *threshold = (*threshold + direction * 0.02).clamp(0.5, 0.99);
-                }
-            }),
-            SliderKind::Hold => self.edit_selected(|preset| {
-                if let Some(FilterConfig::SpeakerLock { hold_ms, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::SpeakerLock { .. }))
-                {
-                    *hold_ms = (*hold_ms).saturating_add_signed((direction * 50.0) as i32);
-                    *hold_ms = (*hold_ms).clamp(50, 1_500);
-                }
-            }),
-            SliderKind::Lookahead => self.edit_selected(|preset| {
-                if let Some(FilterConfig::SpeakerLock { lookahead_ms, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::SpeakerLock { .. }))
-                {
-                    *lookahead_ms =
-                        (*lookahead_ms).saturating_add_signed((direction * 25.0) as i32);
-                    *lookahead_ms = (*lookahead_ms).min(300);
-                }
-            }),
-            SliderKind::Pitch => self.bump_pitch(direction * 0.5),
-            SliderKind::Formant => self.edit_selected(|preset| {
-                preset.formant_semitones =
-                    (preset.formant_semitones + direction * 0.5).clamp(-6.0, 6.0)
-            }),
-            SliderKind::HpfCutoff => self.edit_selected(|preset| {
-                if let Some(FilterConfig::HighPass { cutoff_hz, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::HighPass { .. }))
-                {
-                    *cutoff_hz = (*cutoff_hz + direction * 10.0).clamp(20.0, 300.0);
-                }
-            }),
-            SliderKind::GateThreshold => self.edit_selected(|preset| {
-                if let Some(FilterConfig::NoiseGate { threshold_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::NoiseGate { .. }))
-                {
-                    *threshold_db = (*threshold_db + direction * 1.0).clamp(-60.0, 0.0);
-                }
-            }),
-            SliderKind::EqLow => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Equalizer { low_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
-                {
-                    *low_db = (*low_db + direction * 1.0).clamp(-15.0, 15.0);
-                }
-            }),
-            SliderKind::EqMid => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Equalizer { mid_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
-                {
-                    *mid_db = (*mid_db + direction * 1.0).clamp(-15.0, 15.0);
-                }
-            }),
-            SliderKind::EqHigh => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Equalizer { high_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Equalizer { .. }))
-                {
-                    *high_db = (*high_db + direction * 1.0).clamp(-15.0, 15.0);
-                }
-            }),
-            SliderKind::CompThreshold => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Compressor { threshold_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
-                {
-                    *threshold_db = (*threshold_db + direction * 1.0).clamp(-40.0, 0.0);
-                }
-            }),
-            SliderKind::CompRatio => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Compressor { ratio, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
-                {
-                    *ratio = (*ratio + direction * 0.5).clamp(1.0, 10.0);
-                }
-            }),
-            SliderKind::CompMakeup => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Compressor { makeup_db, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Compressor { .. }))
-                {
-                    *makeup_db = (*makeup_db + direction * 1.0).clamp(0.0, 24.0);
-                }
-            }),
-            SliderKind::ChorusMix => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Chorus { mix, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Chorus { .. }))
-                {
-                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::RobotFreq => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Robotizer { frequency_hz, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Robotizer { .. }))
-                {
-                    *frequency_hz = (*frequency_hz + direction * 10.0).clamp(20.0, 500.0);
-                }
-            }),
-            SliderKind::RobotMix => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Robotizer { mix, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Robotizer { .. }))
-                {
-                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::RingFreq => self.edit_selected(|preset| {
-                if let Some(FilterConfig::RingMod { frequency_hz, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::RingMod { .. }))
-                {
-                    *frequency_hz = (*frequency_hz + direction * 25.0).clamp(50.0, 2000.0);
-                }
-            }),
-            SliderKind::RingMix => self.edit_selected(|preset| {
-                if let Some(FilterConfig::RingMod { mix, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::RingMod { .. }))
-                {
-                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::DistDrive => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Distortion { drive, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Distortion { .. }))
-                {
-                    *drive = (*drive + direction * 1.0).clamp(0.0, 24.0);
-                }
-            }),
-            SliderKind::DistMix => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Distortion { mix, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Distortion { .. }))
-                {
-                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::ReverbRoom => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Reverb { room_size, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Reverb { .. }))
-                {
-                    *room_size = (*room_size + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
-            SliderKind::ReverbMix => self.edit_selected(|preset| {
-                if let Some(FilterConfig::Reverb { mix, .. }) = preset
-                    .filters
-                    .iter_mut()
-                    .find(|f| matches!(f, FilterConfig::Reverb { .. }))
-                {
-                    *mix = (*mix + direction * 0.05).clamp(0.0, 1.0);
-                }
-            }),
+            SliderKind::Pitch => self.bump_pitch(delta * 0.5),
+            SliderKind::Formant => self.bump_formant(delta * 0.5),
+            SliderKind::ClonePitch => {
+                self.clone_session.pitch_offset =
+                    (self.clone_session.pitch_offset + delta * 0.5).clamp(-12.0, 12.0);
+            }
+            SliderKind::CloneFormant => {
+                self.clone_session.formant_offset =
+                    (self.clone_session.formant_offset + delta * 0.5).clamp(-12.0, 12.0);
+            }
+            SliderKind::CloneBlend => {
+                self.clone_session.similarity_blend =
+                    (self.clone_session.similarity_blend + delta * 0.05).clamp(0.0, 1.0);
+            }
+            SliderKind::CloneDenoise => {
+                self.clone_session.denoise_strength =
+                    (self.clone_session.denoise_strength + delta * 0.05).clamp(0.0, 1.0);
+            }
+            _ => {}
         }
     }
 
     fn set_master(&mut self, value: f32) {
         self.master_edit = value.clamp(-24.0, 24.0);
         self.master_dirty = true;
-        self.last_edit = Instant::now();
     }
 
     fn bump_master(&mut self, delta: f32) {
@@ -1696,7 +1647,8 @@ impl App {
             }
             preset.filters.iter_mut().for_each(|filter| {
                 if let FilterConfig::Gain {
-                    enabled, gain_db, ..
+                    ref mut enabled,
+                    ref mut gain_db,
                 } = filter
                 {
                     *enabled = true;
@@ -1709,6 +1661,12 @@ impl App {
     fn bump_pitch(&mut self, delta: f32) {
         self.edit_selected(|preset| {
             preset.pitch_semitones = (preset.pitch_semitones + delta).clamp(-12.0, 12.0);
+        });
+    }
+
+    fn bump_formant(&mut self, delta: f32) {
+        self.edit_selected(|preset| {
+            preset.formant_semitones = (preset.formant_semitones + delta).clamp(-12.0, 12.0);
         });
     }
 
@@ -1730,19 +1688,10 @@ impl App {
         self.needs_send = false;
     }
 
-    fn move_sound(&mut self, delta: i32) {
-        if self.state.sound_clips.is_empty() {
-            return;
-        }
-        let next = (self.selected_sound as i32 + delta)
-            .clamp(0, self.state.sound_clips.len() as i32 - 1) as usize;
-        self.selected_sound = next;
-    }
-
     fn apply_selected(&mut self) {
         let id = self.selected_preset.clone();
         self.send(Request::ApplyPreset { id });
-        self.status = "preset aplicado".into();
+        self.status = "Perfil de voz aplicado al motor PipeWire".into();
     }
 
     fn open_new_preset(&mut self) {
@@ -1755,7 +1704,7 @@ impl App {
     fn open_enroll(&mut self) {
         self.flush_edits(true);
         if !self.state.models_installed {
-            self.status = "instalá primero los modelos de voz (~30 MB)".into();
+            self.status = "Instalá primero los modelos neuronales (~30 MB)".into();
             return;
         }
         self.modal = Some(Modal::EnrollVoice {
@@ -1768,13 +1717,13 @@ impl App {
             return;
         };
         if !preset.builtin {
-            self.status = "solo los presets built-in se pueden restaurar".into();
+            self.status = "Solo los perfiles integrados (built-in) se restauran".into();
             return;
         }
         let id = preset.id.clone();
         self.send(Request::ResetPreset { id });
         self.draft = None;
-        self.status = "preset restaurado".into();
+        self.status = "Perfil restaurado a valores de fábrica".into();
     }
 
     fn delete_selected(&mut self) {
@@ -1782,23 +1731,23 @@ impl App {
             return;
         };
         if preset.builtin {
-            self.status = "un preset built-in no se puede borrar; usá Restaurar".into();
+            self.status = "Un perfil built-in no se puede borrar; usá Restaurar".into();
             return;
         }
         let id = preset.id.clone();
         self.send(Request::DeletePreset { id });
         self.selected_preset = self.state.active_preset.clone();
         self.draft = None;
-        self.status = "preset eliminado".into();
+        self.status = "Perfil personalizado eliminado".into();
     }
 
     fn toggle_mute(&mut self) {
         let mute = !self.state.muted;
         self.send(Request::SetMute { mute });
         self.status = if mute {
-            "mute ON".into()
+            "MUTE activado (micrófono silenciado)".into()
         } else {
-            "mute OFF".into()
+            "MUTE desactivado (micrófono transmitiendo)".into()
         };
     }
 
@@ -1806,9 +1755,9 @@ impl App {
         let bypass = !self.state.bypass;
         self.send(Request::SetBypass { bypass });
         self.status = if bypass {
-            "bypass ON (micrófono limpio)".into()
+            "BYPASS activado (micrófono limpio directo)".into()
         } else {
-            "bypass OFF (DSP activo)".into()
+            "BYPASS desactivado (procesamiento DSP activo)".into()
         };
     }
 
@@ -1819,25 +1768,20 @@ impl App {
             gain_db: self.state.monitor_gain_db,
         });
         self.status = if enabled {
-            "sidetone / monitor ON".into()
+            "🎧 ESCUCHAR MI VOZ: ACTIVADO (Sidetone en auriculares)".into()
         } else {
-            "sidetone / monitor OFF".into()
+            "🎧 ESCUCHAR MI VOZ: APAGADO".into()
         };
     }
 
     fn toggle_loop_test(&mut self) {
         if self.state.loop_test_state == "idle" {
             self.send(Request::StartLoopRecord);
-            self.status = "loop tester: grabando 8s...".into();
+            self.status = "Loop Tester: grabando muestra de 8s...".into();
         } else {
             self.send(Request::StopLoopTest);
-            self.status = "loop tester: detenido".into();
+            self.status = "Loop Tester: bucle detenido".into();
         }
-    }
-
-    fn stop_sounds(&mut self) {
-        self.send(Request::StopSounds);
-        self.status = "sonidos detenidos".into();
     }
 
     fn toggle_noise(&mut self) {
@@ -1856,203 +1800,326 @@ impl App {
     }
 
     fn toggle_speaker(&mut self) {
-        let profiles = self.state.voice_profiles.clone();
+        if !self.state.models_installed {
+            self.status = "Modelos neuronales ausentes. Presioná 'i' para instalarlos".into();
+            return;
+        }
         self.edit_selected(|preset| {
             let was_present = preset.has_filter("speaker_lock");
             if !was_present {
                 preset.add_filter("speaker_lock");
-            }
-            let profile = if profiles.is_empty() {
-                String::new()
             } else {
-                profiles[0].clone()
-            };
-            preset.filters.iter_mut().for_each(|filter| {
-                if let FilterConfig::SpeakerLock {
-                    enabled,
-                    profile: p,
-                    ..
-                } = filter
-                {
-                    if was_present {
+                preset.filters.iter_mut().for_each(|filter| {
+                    if let FilterConfig::SpeakerLock { enabled, .. } = filter {
                         *enabled = !*enabled;
                     }
-                    if *enabled && p.is_empty() {
-                        *p = profile.clone();
-                    }
-                }
-            });
+                });
+            }
         });
-        let enabled = self
-            .selected_or_active()
-            .and_then(|preset| preset.speaker_lock())
-            .is_some();
-        if enabled && self.state.voice_profiles.is_empty() {
-            self.status = "enrolá tu voz antes de activar Solo mi voz".into();
-        } else if enabled && !self.state.models_installed {
-            self.status = "instalá los modelos de voz para usar Solo mi voz".into();
-        } else {
-            self.status = if enabled {
-                "Solo mi voz ON".into()
-            } else {
-                "Solo mi voz OFF".into()
-            };
-        }
     }
 
     fn cycle_profile(&mut self) {
-        let profiles = self.state.voice_profiles.clone();
-        if profiles.is_empty() {
-            self.status = "no hay perfiles; usá Enrolar mi voz".into();
+        if self.state.voice_profiles.is_empty() {
+            self.status = "No hay perfiles de voz enrolados. Usá Enrolar".into();
             return;
         }
+        let current = self
+            .selected()
+            .and_then(|p| p.speaker_lock())
+            .map(|l| l.profile)
+            .unwrap_or_default();
+        let idx = self
+            .state
+            .voice_profiles
+            .iter()
+            .position(|p| p == &current)
+            .map(|i| (i + 1) % self.state.voice_profiles.len())
+            .unwrap_or(0);
+        let next_profile = self.state.voice_profiles[idx].clone();
         self.edit_selected(|preset| {
             if !preset.has_filter("speaker_lock") {
                 preset.add_filter("speaker_lock");
             }
-            preset.filters.iter_mut().for_each(|filter| {
-                if let FilterConfig::SpeakerLock { profile, .. } = filter {
-                    let next = profiles
-                        .iter()
-                        .position(|name| name == profile)
-                        .map(|index| (index + 1) % profiles.len())
-                        .unwrap_or(0);
-                    *profile = profiles[next].clone();
+            preset.filters.iter_mut().for_each(|f| {
+                if let FilterConfig::SpeakerLock {
+                    profile, enabled, ..
+                } = f
+                {
+                    *enabled = true;
+                    *profile = next_profile.clone();
                 }
             });
         });
-        self.status = "perfil de voz cambiado".into();
+        self.status = format!("Perfil de voz activo: {next_profile}");
     }
 
     fn delete_profile(&mut self) {
-        let Some(profile) = self
-            .selected_or_active()
-            .and_then(|preset| preset.speaker_lock())
-            .map(|lock| lock.profile)
-            .filter(|profile| !profile.is_empty())
-        else {
-            self.status = "no hay perfil seleccionado".into();
+        let current = self
+            .selected()
+            .and_then(|p| p.speaker_lock())
+            .map(|l| l.profile)
+            .unwrap_or_default();
+        if current.is_empty() {
             return;
-        };
+        }
         self.send(Request::DeleteVoice {
-            name: profile.clone(),
+            name: current.clone(),
         });
-        self.status = format!("perfil «{profile}» eliminado");
+        self.edit_selected(|preset| {
+            preset.filters.iter_mut().for_each(|f| {
+                if let FilterConfig::SpeakerLock { profile, .. } = f {
+                    profile.clear();
+                }
+            });
+        });
+        self.status = format!("Perfil de voz eliminado: {current}");
     }
 
     fn install_models(&mut self) {
         self.send(Request::InstallModels);
-        self.status = "descargando modelos de voz…".into();
+        self.status = "Descargando modelos neuronales CAM++ (~30 MB)...".into();
     }
 
     fn select_device(&mut self, index: usize) {
         if let Some(device) = self.state.devices.get(index) {
             let name = device.name.clone();
-            let description = device.description.clone();
-            self.selected_device = index;
+            let desc = device.description.clone();
             self.send(Request::SetInput { name });
-            self.status = format!("entrada: {description}");
+            self.status = format!("Micrófono seleccionado: {}", desc);
         }
     }
+
+    // ==========================================
+    // RENDERIZADO RATATUI UI 3.0
+    // ==========================================
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
         self.hitboxes.clear();
         let area = frame.area();
-        let outer = Layout::default()
+
+        let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
-                Constraint::Min(8),
-                Constraint::Length(2),
+                Constraint::Length(4), // Header prominente con botón toggle directo de escuchar voz
+                Constraint::Length(1), // Barra de pestañas
+                Constraint::Min(8),    // Cuerpo del panel según pestaña
+                Constraint::Length(2), // Pie con atajos y estado
             ])
             .split(area);
 
-        self.draw_header(frame, outer[0]);
+        self.draw_header(frame, chunks[0]);
+        self.draw_tabs_bar(frame, chunks[1]);
+
         match self.tab {
-            Tab::Estudio => self.draw_estudio(frame, outer[1]),
-            Tab::VoiceLab => self.draw_voice_lab(frame, outer[1]),
-            Tab::Soundboard => self.draw_soundboard(frame, outer[1]),
-            Tab::Dispositivos => self.draw_devices(frame, outer[1]),
+            Tab::Perfiles => self.draw_perfiles(frame, chunks[2]),
+            Tab::Filtros => self.draw_filtros(frame, chunks[2]),
+            Tab::Dispositivos => self.draw_dispositivos(frame, chunks[2]),
+            Tab::Clonacion => self.draw_clonacion(frame, chunks[2]),
+            Tab::Ajustes => self.draw_ajustes(frame, chunks[2]),
         }
-        self.draw_footer(frame, outer[2]);
+
+        self.draw_footer(frame, chunks[3]);
+
         if self.modal.is_some() {
             self.draw_modal(frame);
         }
     }
 
     fn draw_header(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default().borders(Borders::ALL);
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .style(Style::default().bg(Color::Rgb(18, 20, 26)));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(35), Constraint::Length(52)])
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(2)])
             .split(inner);
 
-        let running = if self.state.running {
-            "RUNNING"
+        // Fila 0: Identidad y Telemetría
+        let (running_text, running_color) = if self.state.running {
+            ("● PIPEWIRE ACTIVO", Color::Green)
         } else {
-            "STOPPED"
-        };
-        let color = if self.state.running {
-            Color::Green
-        } else {
-            Color::Red
+            ("○ MOTOR DETENIDO", Color::Red)
         };
 
-        let mut spans = vec![
-            Span::styled(
-                " MVX ",
+        let row0 = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(35),
+                Constraint::Percentage(30),
+                Constraint::Percentage(35),
+            ])
+            .split(rows[0]);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " MVX 1.0 ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ModularVoiceX4yi "),
+                Span::styled(
+                    format!(" {running_text} "),
+                    Style::default()
+                        .fg(running_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            row0[0],
+        );
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("Latencia total: "),
+                Span::styled(
+                    format!("{:.1} ms", self.state.total_latency_ms),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" (DSP: "),
+                Span::styled(
+                    format!("{:.1} ms", self.state.dsp_latency_ms),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(")"),
+            ]))
+            .alignment(Alignment::Center),
+            row0[1],
+        );
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("Perfil activo: "),
+                Span::styled(
+                    format!("🎙️ {}", self.state.active_preset_name),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .alignment(Alignment::Right),
+            row0[2],
+        );
+
+        // Fila 1: Botón Toggle Escuchar mi voz + Sliders rápidos de audio
+        let row1_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(30), // Botón Toggle Escuchar mi voz (Sidetone)
+                Constraint::Percentage(25), // Volumen Sidetone
+                Constraint::Percentage(15), // Botón MUTE
+                Constraint::Percentage(15), // Botón BYPASS
+                Constraint::Percentage(15), // Volumen Maestro
+            ])
+            .split(rows[1]);
+
+        // Toggle directo y prominente: Escuchar mi voz
+        let (sidetone_label, sidetone_style) = if self.state.monitor_enabled {
+            (
+                " [ 🎧 ESCUCHAR MI VOZ: ON (S) ] ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .bg(Color::LightGreen)
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ModularVoiceX4yi "),
-            Span::styled(
-                format!(" {} ", running),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(
-                " {:.1}ms · {}",
-                self.state.total_latency_ms, self.state.active_preset_name
-            )),
-        ];
+            )
+        } else {
+            (
+                " [ 🎧 ESCUCHAR MI VOZ: OFF (S) ] ",
+                Style::default()
+                    .fg(Color::Gray)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(sidetone_label, sidetone_style)))
+                .alignment(Alignment::Center),
+            row1_cols[0],
+        );
+        self.register(row1_cols[0], Action::ToggleMonitor);
 
-        if self.state.bypass {
-            spans.push(Span::styled(
-                " [⚡BYPASS]",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ));
-        }
-        if self.state.monitor_enabled {
-            spans.push(Span::styled(
-                " [🎧SIDETONE]",
-                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
-            ));
-        }
-        if self.state.muted {
-            spans.push(Span::styled(
-                " [🔇MUTE]",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        }
+        // Slider volumen sidetone
+        self.draw_slider(
+            frame,
+            row1_cols[1],
+            "Retorno",
+            self.state.monitor_gain_db,
+            -24.0,
+            12.0,
+            "dB",
+            SliderKind::MonitorGain,
+        );
 
-        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+        // Botón Mute
+        let (mute_label, mute_style) = if self.state.muted {
+            (
+                " [ 🔇 MUTE ACTIVO (M) ] ",
+                Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                " [ 🎤 MUTE (M) ] ",
+                Style::default().fg(Color::White),
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(mute_label, mute_style)))
+                .alignment(Alignment::Center),
+            row1_cols[2],
+        );
+        self.register(row1_cols[2], Action::ToggleMute);
 
+        // Botón Bypass
+        let (bypass_label, bypass_style) = if self.state.bypass {
+            (
+                " [ ⚡ BYPASS ON (B) ] ",
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                " [ ⚡ BYPASS (B) ] ",
+                Style::default().fg(Color::White),
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(bypass_label, bypass_style)))
+                .alignment(Alignment::Center),
+            row1_cols[3],
+        );
+        self.register(row1_cols[3], Action::ToggleBypass);
+
+        // Slider Volumen maestro
+        self.draw_slider(
+            frame,
+            row1_cols[4],
+            "Master",
+            self.master_edit,
+            -24.0,
+            24.0,
+            "dB",
+            SliderKind::Master,
+        );
+    }
+
+    fn draw_tabs_bar(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let tabs = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
             ])
-            .split(chunks[1]);
-        self.draw_tab_button(frame, tabs[0], "1 Estudio", Tab::Estudio);
-        self.draw_tab_button(frame, tabs[1], "2 Voice Lab", Tab::VoiceLab);
-        self.draw_tab_button(frame, tabs[2], "3 Soundboard", Tab::Soundboard);
-        self.draw_tab_button(frame, tabs[3], "4 Disp.", Tab::Dispositivos);
+            .split(area);
+
+        self.draw_tab_button(frame, tabs[0], "1 Perfiles", Tab::Perfiles);
+        self.draw_tab_button(frame, tabs[1], "2 Filtros / Rack", Tab::Filtros);
+        self.draw_tab_button(frame, tabs[2], "3 Dispositivos", Tab::Dispositivos);
+        self.draw_tab_button(frame, tabs[3], "4 Clonación IA", Tab::Clonacion);
+        self.draw_tab_button(frame, tabs[4], "5 Ajustes & Reset", Tab::Ajustes);
     }
 
     fn draw_tab_button(&mut self, frame: &mut Frame<'_>, area: Rect, label: &str, tab: Tab) {
@@ -2073,434 +2140,269 @@ impl App {
         self.register(area, Action::Tab(tab));
     }
 
-    fn draw_estudio(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let chunks = Layout::default()
+    // ==========================================
+    // PESTAÑA 1: PERFILES
+    // ==========================================
+
+    fn draw_perfiles(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(26),
-                Constraint::Percentage(44),
-                Constraint::Percentage(30),
-            ])
+            .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(area);
-        self.draw_presets(frame, chunks[0]);
-        self.draw_estudio_center(frame, chunks[1]);
-        self.draw_voice(frame, chunks[2]);
-    }
 
-    fn draw_presets(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default().borders(Borders::ALL).title(" Presets ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 4 {
-            return;
-        }
-        let action_height = 2;
-        let list_area = Rect {
-            height: inner.height.saturating_sub(action_height + 1),
-            ..inner
-        };
-        let presets = self.state.presets.clone();
-        let capacity = list_area.height as usize;
-        let selected_index = presets
-            .iter()
-            .position(|preset| preset.id == self.selected_preset)
-            .unwrap_or(0);
-        let start = selected_index.saturating_sub(capacity.saturating_sub(1));
-        for (row, preset) in presets.iter().skip(start).take(capacity).enumerate() {
-            let y = list_area.y + row as u16;
-            let rect = Rect::new(list_area.x, y, list_area.width, 1);
-            let selected = preset.id == self.selected_preset;
-            let active = preset.id == self.state.active_preset;
-            let marker = if active { "●" } else { " " };
-            let kind = if preset.builtin { "" } else { " · personal" };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else if active {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw(format!("{marker} ")),
-                    Span::styled(preset.name.clone(), style),
-                    Span::styled(
-                        kind,
-                        if selected {
-                            style
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        },
-                    ),
-                ])),
-                rect,
-            );
-            self.register(rect, Action::SelectPreset(preset.id.clone()));
-        }
-
-        let new_rect = Rect::new(
-            inner.x,
-            inner.y + inner.height - action_height,
-            inner.width,
-            1,
-        );
-        self.draw_button(frame, new_rect, "＋ Nuevo preset", Action::NewPreset, true);
-
-        let actions = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-        let halves = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(actions);
-        let builtin = self
-            .selected()
-            .map(|preset| preset.builtin)
-            .unwrap_or(false);
-        self.draw_button(frame, halves[0], "Restaurar", Action::ResetPreset, builtin);
-        self.draw_button(frame, halves[1], "Borrar", Action::DeletePreset, !builtin);
-    }
-
-    fn draw_estudio_center(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
+        // Columna izquierda: Lista de perfiles y botones de gestión
+        let block_left = Block::default()
             .borders(Borders::ALL)
-            .title(" Controles de Estudio y Monitoreo ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 10 {
-            return;
+            .title(" Biblioteca de Perfiles de Voz ");
+        let inner_left = block_left.inner(cols[0]);
+        frame.render_widget(block_left, cols[0]);
+
+        if inner_left.height >= 5 {
+            let left_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2), Constraint::Length(1)])
+                .split(inner_left);
+
+            let presets = self.state.presets.clone();
+            let capacity = left_layout[0].height as usize;
+            let selected_index = presets
+                .iter()
+                .position(|p| p.id == self.selected_preset)
+                .unwrap_or(0);
+            let start = selected_index.saturating_sub(capacity.saturating_sub(1));
+
+            for (row, preset) in presets.iter().skip(start).take(capacity).enumerate() {
+                let y = left_layout[0].y + row as u16;
+                let rect = Rect::new(left_layout[0].x, y, left_layout[0].width, 1);
+                let selected = preset.id == self.selected_preset;
+                let active = preset.id == self.state.active_preset;
+
+                let marker = if active { "●" } else { " " };
+                let badge = if preset.builtin {
+                    Span::styled(" [BUILT-IN]", Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::styled(" [CUSTOM]", Style::default().fg(Color::Magenta))
+                };
+
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if active {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(format!("{marker} ")),
+                        Span::styled(preset.name.clone(), style),
+                        badge,
+                    ])),
+                    rect,
+                );
+                self.register(rect, Action::SelectPreset(preset.id.clone()));
+            }
+
+            // Botones: Crear perfil
+            self.draw_button(
+                frame,
+                left_layout[1],
+                "＋ Crear nuevo perfil (N)",
+                Action::NewPreset,
+                true,
+            );
+
+            // Botones inferiores: Activar, Restaurar, Borrar
+            let action_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(30),
+                ])
+                .split(left_layout[2]);
+
+            let is_builtin = self
+                .selected()
+                .map(|p| p.builtin)
+                .unwrap_or(false);
+
+            self.draw_button(
+                frame,
+                action_cols[0],
+                "✓ Activar (Enter)",
+                Action::ApplyPreset,
+                true,
+            );
+            self.draw_button(
+                frame,
+                action_cols[1],
+                "↺ Restaurar (R)",
+                Action::ResetPreset,
+                is_builtin,
+            );
+            self.draw_button(
+                frame,
+                action_cols[2],
+                "🗑 Borrar (D)",
+                Action::DeletePreset,
+                !is_builtin,
+            );
         }
 
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // Meters
-                Constraint::Length(1), // Spectrum
-                Constraint::Length(1), // Master Volume
-                Constraint::Length(1), // Preset Gain
-                Constraint::Length(1), // Mute & Bypass
-                Constraint::Length(1), // Sidetone
-                Constraint::Length(1), // Sidetone gain
-                Constraint::Length(1), // Loop Tester
-                Constraint::Length(1), // Noise reduction
-                Constraint::Length(1), // Noise strength
-                Constraint::Length(1), // Speaker Lock
-                Constraint::Length(2), // Speaker status
-                Constraint::Length(1), // Speaker profile actions
-                Constraint::Min(1),    // Latency info
-            ])
-            .split(inner);
-
-        // Meter VU bar
-        let in_ratio = db_to_ratio(self.state.input_peak_db);
-        let out_ratio = db_to_ratio(self.state.output_peak_db);
-        let meter_cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[0]);
-        frame.render_widget(
-            Gauge::default()
-                .gauge_style(Style::default().fg(if self.state.input_peak_db > -3.0 {
-                    Color::Red
-                } else {
-                    Color::Green
-                }))
-                .ratio(in_ratio)
-                .label(format!("In: {:.1} dB", self.state.input_peak_db)),
-            meter_cols[0],
-        );
-        frame.render_widget(
-            Gauge::default()
-                .gauge_style(Style::default().fg(if self.state.output_peak_db > -3.0 {
-                    Color::Red
-                } else {
-                    Color::Cyan
-                }))
-                .ratio(out_ratio)
-                .label(format!("Out: {:.1} dB", self.state.output_peak_db)),
-            meter_cols[1],
-        );
-
-        // Real-time 8-band Spectrum Visualizer
-        let mut spectrum_spans = vec![Span::styled(
-            "Espectro: ",
-            Style::default().fg(Color::DarkGray),
-        )];
-        let band_labels = ["60", "150", "400", "1k", "2.5k", "5k", "8k", "14k"];
-        for (i, label) in band_labels.iter().enumerate() {
-            let db = self.state.spectrum_db.get(i).copied().unwrap_or(-60.0);
-            let bar = spark_bar(db);
-            let bar_color = if db > -6.0 {
-                Color::Red
-            } else if db > -18.0 {
-                Color::Yellow
-            } else if db > -35.0 {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            };
-            spectrum_spans.push(Span::raw(format!("{label}:")));
-            spectrum_spans.push(Span::styled(
-                format!("{bar} "),
-                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spectrum_spans)), rows[1]);
+        // Columna derecha: Inspección y Afinación rápida del perfil seleccionado
+        let block_right = Block::default()
+            .borders(Borders::ALL)
+            .title(" Detalle y Parámetros del Perfil ");
+        let inner_right = block_right.inner(cols[1]);
+        frame.render_widget(block_right, cols[1]);
 
         let Some(preset) = self.selected_or_active().cloned() else {
             return;
         };
 
-        // Master Volume
-        self.draw_slider(
-            frame,
-            rows[2],
-            "Volumen maestro",
-            self.master_edit,
-            -24.0,
-            24.0,
-            "dB",
-            SliderKind::Master,
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Info banner
+                Constraint::Length(1), // Quality selector title
+                Constraint::Length(1), // Quality buttons
+                Constraint::Length(1), // Sliders title
+                Constraint::Length(1), // Pitch
+                Constraint::Length(1), // Formant
+                Constraint::Length(1), // Preset Gain
+                Constraint::Min(4),    // Rack de filtros activos resumen
+            ])
+            .split(inner_right);
+
+        // Banner informativo
+        let status_desc = if preset.id == self.state.active_preset {
+            "Perfil actualmente ACTIVO en la salida PipeWire"
+        } else {
+            "Perfil seleccionado para edición (presioná Enter para activar)"
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        preset.name.clone(),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  (ID: {})", preset.id)),
+                ]),
+                Line::from(Span::styled(status_desc, Style::default().fg(Color::Gray))),
+            ]),
+            right_rows[0],
         );
 
-        // Preset Gain
-        let preset_gain = preset.gain_db();
+        // Calidad DSP
+        frame.render_widget(
+            Paragraph::new("Calidad de procesamiento y latencia:").style(Style::default().fg(Color::DarkGray)),
+            right_rows[1],
+        );
+
+        let q_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+            ])
+            .split(right_rows[2]);
+
+        for (idx, quality) in [Quality::Ultra, Quality::Balanced, Quality::High]
+            .into_iter()
+            .enumerate()
+        {
+            let label = format!("{} (~{:.0}ms)", quality.label(), quality.latency_ms());
+            let selected = preset.quality == quality;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, style))).alignment(Alignment::Center),
+                q_cols[idx],
+            );
+            self.register(q_cols[idx], Action::Quality(quality));
+        }
+
+        // Sliders de tono y ganancia rápida
         self.draw_slider(
             frame,
-            rows[3],
-            "Ganancia del preset",
-            preset_gain,
+            right_rows[4],
+            "Tono fundamental (Pitch)",
+            preset.pitch_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Pitch,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[5],
+            "Timbre garganta (Formantes)",
+            preset.formant_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Formant,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[6],
+            "Ganancia del perfil",
+            preset.gain_db(),
             -24.0,
             24.0,
             "dB",
             SliderKind::PresetGain,
         );
 
-        // Toggles: Mute & Bypass
-        let mute_bypass = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[4]);
-        let mute_label = if self.state.muted {
-            "[x] Silenciar (M)"
-        } else {
-            "[ ] Silenciar (M)"
-        };
-        self.draw_toggle(
-            frame,
-            mute_bypass[0],
-            mute_label,
-            Action::ToggleMute,
-            self.state.muted,
-        );
-
-        let bypass_label = if self.state.bypass {
-            "[x] DSP Bypass (B)"
-        } else {
-            "[ ] DSP Bypass (B)"
-        };
-        self.draw_toggle(
-            frame,
-            mute_bypass[1],
-            bypass_label,
-            Action::ToggleBypass,
-            self.state.bypass,
-        );
-
-        // Sidetone
-        let sidetone_label = if self.state.monitor_enabled {
-            "[x] Sidetone / Retorno auriculares (S)"
-        } else {
-            "[ ] Sidetone / Retorno auriculares (S)"
-        };
-        self.draw_toggle(
-            frame,
-            rows[5],
-            sidetone_label,
-            Action::ToggleMonitor,
-            self.state.monitor_enabled,
-        );
-
-        self.draw_slider(
-            frame,
-            rows[6],
-            "Volumen Sidetone",
-            self.state.monitor_gain_db,
-            -24.0,
-            12.0,
-            "dB",
-            SliderKind::MonitorGain,
-        );
-
-        // Voice Tester Loop
-        let tester_cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(rows[7]);
-        let loop_text = match self.state.loop_test_state.as_str() {
-            "recording" => "● Grabando 8s...",
-            "looping" => "▶ Reproduciendo bucle",
-            _ => "Loop Tester: inactivo",
-        };
-        let loop_color = match self.state.loop_test_state.as_str() {
-            "recording" => Color::Red,
-            "looping" => Color::Green,
-            _ => Color::Gray,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                loop_text,
-                Style::default().fg(loop_color).add_modifier(Modifier::BOLD),
-            ))),
-            tester_cols[0],
-        );
-        let btn_label = if self.state.loop_test_state == "idle" {
-            "● Grabar 8s (L)"
-        } else {
-            "■ Detener bucle (L)"
-        };
-        self.draw_button(
-            frame,
-            tester_cols[1],
-            btn_label,
-            Action::ToggleLoopRecord,
-            true,
-        );
-
-        // RNNoise
-        let nr = preset.noise_reduction();
-        let nr_label = if nr.is_some() {
-            "[x] Reducción de ruido (RNNoise)"
-        } else {
-            "[ ] Reducción de ruido (RNNoise)"
-        };
-        self.draw_toggle(frame, rows[8], nr_label, Action::ToggleNoise, nr.is_some());
-        self.draw_slider(
-            frame,
-            rows[9],
-            "Intensidad NR",
-            nr.unwrap_or(0.0),
-            0.0,
-            1.0,
-            "",
-            SliderKind::Noise,
-        );
-
-        // Speaker Lock
-        let speaker = preset.speaker_lock();
-        let speaker_label = if speaker.is_some() {
-            "[x] Solo mi voz (CAM++)"
-        } else {
-            "[ ] Solo mi voz (CAM++)"
-        };
-        self.draw_toggle(
-            frame,
-            rows[10],
-            speaker_label,
-            Action::ToggleSpeaker,
-            speaker.is_some(),
-        );
-
-        if speaker.is_some() {
-            self.draw_slider(
-                frame,
-                rows[11],
-                "Umbral coincidencia",
-                speaker.as_ref().map(|lock| lock.threshold).unwrap_or(0.72),
-                0.50,
-                0.99,
-                "",
-                SliderKind::Threshold,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(self.state.speaker_status.clone())
-                    .style(Style::default().fg(Color::Gray))
-                    .wrap(Wrap { trim: true }),
-                rows[11],
-            );
+        // Resumen de módulos activos en el rack
+        let mut active_badges = Vec::new();
+        active_badges.push(Span::styled("Filtros en cadena: ", Style::default().fg(Color::DarkGray)));
+        for filter in &preset.filters {
+            if filter.enabled() {
+                active_badges.push(Span::styled(
+                    format!(" [✓ {}] ", filter.kind()),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                active_badges.push(Span::styled(
+                    format!(" [  {}] ", filter.kind()),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
-
-        let profile_row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(44),
-                Constraint::Percentage(28),
-                Constraint::Percentage(28),
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(active_badges),
+                Line::from(""),
+                Line::from("💡 Podés configurar y afinar cada filtro al detalle en la pestaña '2 Filtros'."),
             ])
-            .split(rows[12]);
-        let profile_label = format!(
-            "Perfil: {}",
-            speaker
-                .as_ref()
-                .map(|lock| {
-                    if lock.profile.is_empty() {
-                        "(elegir)"
-                    } else {
-                        &lock.profile
-                    }
-                })
-                .unwrap_or("(ninguno)")
-        );
-        self.draw_button(
-            frame,
-            profile_row[0],
-            &profile_label,
-            Action::CycleProfile,
-            true,
-        );
-        self.draw_button(
-            frame,
-            profile_row[1],
-            "Enrolar",
-            Action::EnrollVoice,
-            true,
-        );
-        if !self.state.models_installed {
-            self.draw_button(
-                frame,
-                profile_row[2],
-                "Modelos",
-                Action::InstallModels,
-                true,
-            );
-        } else {
-            let has_profile = speaker
-                .as_ref()
-                .is_some_and(|lock| !lock.profile.trim().is_empty());
-            self.draw_button(
-                frame,
-                profile_row[2],
-                "Borrar",
-                Action::DeleteVoice,
-                has_profile,
-            );
-        }
-
-        frame.render_widget(
-            Paragraph::new(vec![Line::from(format!(
-                "Latencia: base {:.1} + DSP {:.1} = {:.1} ms · Quantum {} · Xruns {}",
-                self.state.latency_ms,
-                self.state.dsp_latency_ms,
-                self.state.total_latency_ms,
-                self.state.quantum,
-                self.state.xruns
-            ))])
-            .style(Style::default().fg(Color::DarkGray)),
-            rows[13],
+            .wrap(Wrap { trim: true }),
+            right_rows[7],
         );
     }
 
-    fn draw_voice_lab(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    // ==========================================
+    // PESTAÑA 2: FILTROS (VOICE LAB)
+    // ==========================================
+
+    fn draw_filtros(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Voice Lab: {} ", self.state.active_preset_name));
+            .title(format!(" Rack de Efectos y Filtros: {} ", self.state.active_preset_name));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if inner.height < 10 {
-            return;
-        }
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -2511,7 +2413,7 @@ impl App {
             return;
         };
 
-        // LEFT COLUMN: Pre-procesamiento y Dinámica (HPF, Gate, EQ, Compressor)
+        // COLUMNA IZQUIERDA: Rack A - Limpieza, Dinámica y Ecualización
         let left_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -2519,7 +2421,12 @@ impl App {
                 Constraint::Length(1), // HPF Cutoff
                 Constraint::Length(1), // Gate toggle
                 Constraint::Length(1), // Gate threshold
-                Constraint::Length(1), // Gate reduction status
+                Constraint::Length(1), // Gate meter status
+                Constraint::Length(1), // RNNoise toggle
+                Constraint::Length(1), // RNNoise strength
+                Constraint::Length(1), // Solo mi voz (CAM++) toggle
+                Constraint::Length(1), // Solo mi voz threshold
+                Constraint::Length(1), // Solo mi voz profile / enrolar
                 Constraint::Length(1), // EQ toggle
                 Constraint::Length(1), // EQ Low
                 Constraint::Length(1), // EQ Mid
@@ -2528,7 +2435,7 @@ impl App {
                 Constraint::Length(1), // Comp threshold
                 Constraint::Length(1), // Comp ratio
                 Constraint::Length(1), // Comp makeup
-                Constraint::Min(1),    // Comp reduction status
+                Constraint::Min(1),    // Comp reduction meter
             ])
             .split(cols[0]);
 
@@ -2588,11 +2495,98 @@ impl App {
             left_rows[4],
         );
 
-        // 3-Band Parametric EQ
-        let eq = preset.equalizer();
+        // RNNoise
+        let nr = preset.noise_reduction();
         self.draw_toggle(
             frame,
             left_rows[5],
+            if nr.is_some() {
+                "[x] Reducción Neuronal (RNNoise)"
+            } else {
+                "[ ] Reducción Neuronal (RNNoise)"
+            },
+            Action::ToggleNoise,
+            nr.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            left_rows[6],
+            "Intensidad NR",
+            nr.unwrap_or(0.5),
+            0.0,
+            1.0,
+            "",
+            SliderKind::Noise,
+        );
+
+        // Solo mi voz (CAM++ Speaker Verification)
+        let speaker = preset.speaker_lock();
+        self.draw_toggle(
+            frame,
+            left_rows[7],
+            if speaker.is_some() {
+                "[x] Solo mi voz (Aislamiento CAM++)"
+            } else {
+                "[ ] Solo mi voz (Aislamiento CAM++)"
+            },
+            Action::ToggleSpeaker,
+            speaker.is_some(),
+        );
+        self.draw_slider(
+            frame,
+            left_rows[8],
+            "Umbral CAM++",
+            speaker.as_ref().map(|l| l.threshold).unwrap_or(0.72),
+            0.50,
+            0.99,
+            "",
+            SliderKind::Threshold,
+        );
+        let spk_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(left_rows[9]);
+        let active_prof = speaker
+            .as_ref()
+            .map(|l| {
+                if l.profile.is_empty() {
+                    "(sin perfil)"
+                } else {
+                    &l.profile
+                }
+            })
+            .unwrap_or("(desactivado)");
+        self.draw_button(
+            frame,
+            spk_cols[0],
+            &format!("Perfil: {active_prof}"),
+            Action::CycleProfile,
+            true,
+        );
+        self.draw_button(
+            frame,
+            spk_cols[1],
+            "Enrolar",
+            Action::EnrollVoice,
+            true,
+        );
+        self.draw_button(
+            frame,
+            spk_cols[2],
+            "Borrar",
+            Action::DeleteVoice,
+            speaker.as_ref().is_some_and(|l| !l.profile.is_empty()),
+        );
+
+        // EQ 3 Bandas
+        let eq = preset.equalizer();
+        self.draw_toggle(
+            frame,
+            left_rows[10],
             if eq.is_some() {
                 "[x] Ecualizador 3-Bandas"
             } else {
@@ -2604,7 +2598,7 @@ impl App {
         let (low, mid, high) = eq.unwrap_or((0.0, 0.0, 0.0));
         self.draw_slider(
             frame,
-            left_rows[6],
+            left_rows[11],
             "EQ Graves (100Hz)",
             low,
             -15.0,
@@ -2614,7 +2608,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            left_rows[7],
+            left_rows[12],
             "EQ Medios (1kHz)",
             mid,
             -15.0,
@@ -2624,7 +2618,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            left_rows[8],
+            left_rows[13],
             "EQ Agudos (8kHz)",
             high,
             -15.0,
@@ -2633,11 +2627,11 @@ impl App {
             SliderKind::EqHigh,
         );
 
-        // Compressor
+        // Compresor
         let comp = preset.compressor();
         self.draw_toggle(
             frame,
-            left_rows[9],
+            left_rows[14],
             if comp.is_some() {
                 "[x] Compresor de Estudio"
             } else {
@@ -2648,7 +2642,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            left_rows[10],
+            left_rows[15],
             "Umbral Compresor",
             comp.as_ref().map(|c| c.threshold_db).unwrap_or(-18.0),
             -40.0,
@@ -2658,7 +2652,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            left_rows[11],
+            left_rows[16],
             "Ratio Compresor",
             comp.as_ref().map(|c| c.ratio).unwrap_or(3.0),
             1.0,
@@ -2668,7 +2662,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            left_rows[12],
+            left_rows[17],
             "Ganancia Makeup",
             comp.as_ref().map(|c| c.makeup_db).unwrap_or(2.0),
             0.0,
@@ -2682,13 +2676,15 @@ impl App {
                 self.state.comp_reduction_db
             ))
             .style(Style::default().fg(Color::DarkGray)),
-            left_rows[13],
+            left_rows[18],
         );
 
-        // RIGHT COLUMN: Efectos de Carácter y Modulación (Robot, RingMod, Dist, Chorus, Reverb)
+        // COLUMNA DERECHA: Rack B - Modulación, Carácter y Efectos Creativos
         let right_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // Pitch
+                Constraint::Length(1), // Formant
                 Constraint::Length(1), // Robotizer toggle
                 Constraint::Length(1), // Robotizer freq
                 Constraint::Length(1), // Robotizer mix
@@ -2706,11 +2702,33 @@ impl App {
             ])
             .split(cols[1]);
 
+        // Pitch & Formants
+        self.draw_slider(
+            frame,
+            right_rows[0],
+            "Tono (Pitch)",
+            preset.pitch_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Pitch,
+        );
+        self.draw_slider(
+            frame,
+            right_rows[1],
+            "Formantes (Timbre)",
+            preset.formant_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Formant,
+        );
+
         // Robotizer
         let robot = preset.robotizer();
         self.draw_toggle(
             frame,
-            right_rows[0],
+            right_rows[2],
             if robot.is_some() {
                 "[x] Robotizador"
             } else {
@@ -2722,7 +2740,7 @@ impl App {
         let (rfreq, rmix) = robot.unwrap_or((80.0, 0.5));
         self.draw_slider(
             frame,
-            right_rows[1],
+            right_rows[3],
             "Frecuencia Robot",
             rfreq,
             20.0,
@@ -2732,7 +2750,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[2],
+            right_rows[4],
             "Mezcla Robot",
             rmix,
             0.0,
@@ -2745,7 +2763,7 @@ impl App {
         let ring = preset.ring_mod();
         self.draw_toggle(
             frame,
-            right_rows[3],
+            right_rows[5],
             if ring.is_some() {
                 "[x] Modulador en Anillo (Alien)"
             } else {
@@ -2757,7 +2775,7 @@ impl App {
         let (ring_f, ring_m) = ring.unwrap_or((240.0, 0.5));
         self.draw_slider(
             frame,
-            right_rows[4],
+            right_rows[6],
             "Frecuencia Portadora",
             ring_f,
             50.0,
@@ -2767,7 +2785,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[5],
+            right_rows[7],
             "Mezcla Anillo",
             ring_m,
             0.0,
@@ -2780,7 +2798,7 @@ impl App {
         let dist = preset.distortion();
         self.draw_toggle(
             frame,
-            right_rows[6],
+            right_rows[8],
             if dist.is_some() {
                 "[x] Distorsión / Saturación"
             } else {
@@ -2791,7 +2809,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[7],
+            right_rows[9],
             "Drive Distorsión",
             dist.as_ref().map(|d| d.drive).unwrap_or(6.0),
             0.0,
@@ -2801,7 +2819,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[8],
+            right_rows[10],
             "Mezcla Distorsión",
             dist.as_ref().map(|d| d.mix).unwrap_or(0.5),
             0.0,
@@ -2814,7 +2832,7 @@ impl App {
         let chorus = preset.chorus();
         self.draw_toggle(
             frame,
-            right_rows[9],
+            right_rows[11],
             if chorus.is_some() {
                 "[x] Chorus / Doubler"
             } else {
@@ -2825,7 +2843,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[10],
+            right_rows[12],
             "Mezcla Chorus",
             chorus.as_ref().map(|c| c.mix).unwrap_or(0.4),
             0.0,
@@ -2838,7 +2856,7 @@ impl App {
         let reverb = preset.reverb();
         self.draw_toggle(
             frame,
-            right_rows[11],
+            right_rows[13],
             if reverb.is_some() {
                 "[x] Reverberación de Sala"
             } else {
@@ -2849,7 +2867,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[12],
+            right_rows[14],
             "Tamaño de Sala",
             reverb.as_ref().map(|r| r.room_size).unwrap_or(0.6),
             0.0,
@@ -2859,7 +2877,7 @@ impl App {
         );
         self.draw_slider(
             frame,
-            right_rows[13],
+            right_rows[15],
             "Mezcla Reverb",
             reverb.as_ref().map(|r| r.mix).unwrap_or(0.3),
             0.0,
@@ -2869,438 +2887,571 @@ impl App {
         );
     }
 
-    fn draw_soundboard(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Tablero de Sonidos (Soundboard) ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 6 {
-            return;
-        }
+    // ==========================================
+    // PESTAÑA 3: DISPOSITIVOS & AUDIO PIPEWIRE
+    // ==========================================
 
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // Active playback status
-                Constraint::Length(1), // Stop button
-                Constraint::Min(4),    // Sound list / grid
-                Constraint::Length(3), // Footer hints
-            ])
-            .split(inner);
-
-        // Active playback banner
-        let (status_text, status_color) = if let Some(active) = &self.state.active_sound_clip {
-            (
-                format!("▶ Reproduciendo: «{}» (Micrófono atenuado automáticamente -70%)", active),
-                Color::Green,
-            )
-        } else {
-            (
-                "■ En espera (Micrófono al 100%)".to_string(),
-                Color::DarkGray,
-            )
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                status_text,
-                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
-            ))),
-            rows[0],
-        );
-
-        // Stop all button
-        self.draw_button(
-            frame,
-            rows[1],
-            "■ Detener todos los sonidos (Espacio)",
-            Action::StopSounds,
-            true,
-        );
-
-        // Sound clips list
-        let clips = self.state.sound_clips.clone();
-        let capacity = rows[2].height as usize;
-        let start = self.selected_sound.saturating_sub(capacity.saturating_sub(1));
-        for (row, (index, clip)) in clips
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(capacity)
-            .enumerate()
-        {
-            let rect = Rect::new(rows[2].x, rows[2].y + row as u16, rows[2].width, 1);
-            let selected = index == self.selected_sound;
-            let is_playing = self.state.active_sound_clip.as_deref() == Some(&clip.id);
-            let hotkey = if index < 9 {
-                format!("[{}]", index + 1)
-            } else {
-                "   ".to_string()
-            };
-            let play_icon = if is_playing { "▶ " } else { "  " };
-
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_playing {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
-            let label = format!(
-                "{} {} {:<24} ({:.1}s) {}",
-                hotkey,
-                play_icon,
-                clip.name,
-                clip.duration_secs,
-                if clip.builtin { "· built-in" } else { "· audio" }
-            );
-
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(label, style))),
-                rect,
-            );
-            self.register(rect, Action::TriggerSound(clip.id.clone()));
-        }
-
-        // Footer hints
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from("💡 Directorio de clips: ~/.local/share/mvx/sounds/ (archivos WAV estándar)"),
-                Line::from("   Atajos globales: 'mvx ctl sound <id>' para teclas rápidas en Hyprland / Sway / KDE"),
-            ])
-            .style(Style::default().fg(Color::DarkGray)),
-            rows[3],
-        );
-    }
-
-    fn draw_voice(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Modulación de voz ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 8 {
-            return;
-        }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .split(inner);
-        let Some(preset) = self.selected_or_active().cloned() else {
-            return;
-        };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        preset.name.clone(),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(if preset.builtin {
-                        "  · built-in"
-                    } else {
-                        "  · personal"
-                    }),
-                ]),
-                Line::from(format!(
-                    "Pitch {:+.1} st · Formante {:+.1} st",
-                    preset.pitch_semitones, preset.formant_semitones
-                )),
-            ]),
-            rows[0],
-        );
-        self.draw_slider(
-            frame,
-            rows[1],
-            "Tono (pitch)",
-            preset.pitch_semitones,
-            -12.0,
-            12.0,
-            "st",
-            SliderKind::Pitch,
-        );
-        self.draw_slider(
-            frame,
-            rows[2],
-            "Formantes",
-            preset.formant_semitones,
-            -6.0,
-            6.0,
-            "st",
-            SliderKind::Formant,
-        );
-        frame.render_widget(
-            Paragraph::new("Calidad DSP (latencia / CPU)").style(Style::default().fg(Color::Gray)),
-            rows[3],
-        );
-        let qualities = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-            ])
-            .split(rows[4]);
-        for (index, quality) in [Quality::Ultra, Quality::Balanced, Quality::High]
-            .into_iter()
-            .enumerate()
-        {
-            let short = match quality {
-                Quality::Ultra => "Ultra",
-                Quality::Balanced => "Equil.",
-                Quality::High => "Alta",
-            };
-            let label = format!("{short} {:.0}ms", quality.latency_ms());
-            let selected = preset.quality == quality;
-            let rect = qualities[index];
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    label,
-                    if selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                )))
-                .alignment(Alignment::Center),
-                rect,
-            );
-            self.register(rect, Action::Quality(quality));
-        }
-        let actions = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[5]);
-        self.draw_button(
-            frame,
-            actions[0],
-            "Aplicar preset",
-            Action::ApplyPreset,
-            true,
-        );
-        self.draw_button(
-            frame,
-            actions[1],
-            "Restaurar",
-            Action::ResetPreset,
-            preset.builtin,
-        );
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(""),
-                Line::from("El pitch altera el tono fundamental."),
-                Line::from("Los formantes cambian el timbre de garganta."),
-                Line::from(""),
-                Line::from("0 st en ambos = voz natural."),
-            ])
-            .style(Style::default().fg(Color::DarkGray))
-            .wrap(Wrap { trim: true }),
-            rows[6],
-        );
-    }
-
-    fn draw_devices(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let chunks = Layout::default()
+    fn draw_dispositivos(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(area);
-        let block = Block::default()
+
+        // Columna izquierda: Selección de micrófonos físicos
+        let block_left = Block::default()
             .borders(Borders::ALL)
-            .title(" Entrada física ");
-        let inner = block.inner(chunks[0]);
-        frame.render_widget(block, chunks[0]);
-        let capacity = inner.height.saturating_sub(2) as usize;
-        let start = self
-            .selected_device
-            .saturating_sub(capacity.saturating_sub(1));
-        let devices = self.state.devices.clone();
-        for (row, (index, device)) in devices
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(capacity)
-            .enumerate()
-        {
-            let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
-            let selected = self.state.selected_input.as_deref() == Some(device.name.as_str());
-            let highlighted = index == self.selected_device;
-            let style = if highlighted {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else if selected {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw(if selected { "● " } else { "  " }),
-                    Span::styled(device.description.clone(), style),
-                ])),
-                rect,
+            .title(" Entradas Físicas de Micrófono ");
+        let inner_left = block_left.inner(cols[0]);
+        frame.render_widget(block_left, cols[0]);
+
+        if inner_left.height >= 4 {
+            let left_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(inner_left);
+
+            let capacity = left_layout[0].height as usize;
+            let start = self
+                .selected_device
+                .saturating_sub(capacity.saturating_sub(1));
+            let devices = self.state.devices.clone();
+
+            for (row, (index, device)) in devices
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(capacity)
+                .enumerate()
+            {
+                let rect = Rect::new(left_layout[0].x, left_layout[0].y + row as u16, left_layout[0].width, 1);
+                let selected = self.state.selected_input.as_deref() == Some(device.name.as_str());
+                let highlighted = index == self.selected_device;
+
+                let style = if highlighted {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(if selected { "● " } else { "  " }),
+                        Span::styled(device.description.clone(), style),
+                    ])),
+                    rect,
+                );
+                self.register(rect, Action::SelectDevice(index));
+            }
+
+            self.draw_button(
+                frame,
+                left_layout[1],
+                "Actualizar lista de dispositivos PipeWire",
+                Action::Rescan,
+                true,
             );
-            self.register(rect, Action::SelectDevice(index));
         }
-        let button = Rect::new(
-            inner.x,
-            inner.y + inner.height.saturating_sub(1),
-            inner.width,
-            1,
-        );
-        self.draw_button(
-            frame,
-            button,
-            "Actualizar dispositivos",
-            Action::Rescan,
-            true,
-        );
-        let right = Layout::default()
+
+        // Columna derecha: Vúmetros, Espectro, Voice Tester Loop y Diagnóstico
+        let block_right = Block::default()
+            .borders(Borders::ALL)
+            .title(" Telemetría y Diagnóstico de PipeWire ");
+        let inner_right = block_right.inner(cols[1]);
+        frame.render_widget(block_right, cols[1]);
+
+        let right_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Min(1),
+                Constraint::Length(2), // VU Meters In/Out
+                Constraint::Length(1), // Espectro 8 bandas
+                Constraint::Length(2), // Voice Tester Loop
+                Constraint::Length(4), // PipeWire stream details
+                Constraint::Min(2),    // Error log
             ])
-            .split(chunks[1]);
-        let input = self
-            .state
-            .selected_input_description
-            .clone()
-            .or_else(|| self.state.selected_input.clone())
-            .unwrap_or_else(|| "(sin entrada)".into());
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("Entrada: ", Style::default().fg(Color::Gray)),
-                    Span::raw(input),
-                ]),
-                Line::from(format!("Salida: {} (virtual)", self.state.virtual_source)),
-                Line::from(format!(
-                    "Formato: {} Hz · {} ch",
-                    self.state.sample_rate, self.state.channels
-                )),
-                Line::from(format!(
-                    "Quantum: {} · latencia base {:.2} ms",
-                    self.state.quantum, self.state.latency_ms
-                )),
-                Line::from(format!(
-                    "DSP: {:.2} ms · total {:.2} ms",
-                    self.state.dsp_latency_ms, self.state.total_latency_ms
-                )),
-            ])
-            .block(Block::default().borders(Borders::ALL).title(" Salida ")),
-            right[0],
-        );
+            .split(inner_right);
+
+        // Vúmetros de Entrada y Salida
+        let meter_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(right_rows[0]);
+
         let in_ratio = db_to_ratio(self.state.input_peak_db);
         let out_ratio = db_to_ratio(self.state.output_peak_db);
-        let gauges = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(3)])
-            .split(right[1]);
+
         frame.render_widget(
             Gauge::default()
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Peak entrada "),
-                )
                 .gauge_style(Style::default().fg(if self.state.input_peak_db > -3.0 {
                     Color::Red
                 } else {
                     Color::Green
                 }))
                 .ratio(in_ratio)
-                .label(format!("{:.1} dB", self.state.input_peak_db)),
-            gauges[0],
+                .label(format!("In Peak: {:.1} dB", self.state.input_peak_db)),
+            meter_cols[0],
         );
+
         frame.render_widget(
             Gauge::default()
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Peak salida "),
-                )
                 .gauge_style(Style::default().fg(if self.state.output_peak_db > -3.0 {
                     Color::Red
                 } else {
                     Color::Cyan
                 }))
                 .ratio(out_ratio)
-                .label(format!("{:.1} dB", self.state.output_peak_db)),
-            gauges[1],
+                .label(format!("Out Peak: {:.1} dB", self.state.output_peak_db)),
+            meter_cols[1],
         );
-        let error = self
+
+        // Espectro de 8 bandas
+        let mut spectrum_spans = vec![Span::styled(
+            "Espectro: ",
+            Style::default().fg(Color::DarkGray),
+        )];
+        let band_labels = ["60", "150", "400", "1k", "2.5k", "5k", "8k", "14k"];
+        for (i, label) in band_labels.iter().enumerate() {
+            let db = self.state.spectrum_db.get(i).copied().unwrap_or(-60.0);
+            let bar = spark_bar(db);
+            let bar_color = if db > -6.0 {
+                Color::Red
+            } else if db > -18.0 {
+                Color::Yellow
+            } else if db > -35.0 {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            spectrum_spans.push(Span::raw(format!("{label}:")));
+            spectrum_spans.push(Span::styled(
+                format!("{bar} "),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spectrum_spans)), right_rows[1]);
+
+        // Voice Tester Loop
+        let loop_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(right_rows[2]);
+
+        let (loop_text, loop_color) = match self.state.loop_test_state.as_str() {
+            "recording" => ("● Grabando 8s de voz...", Color::Red),
+            "looping" => ("▶ Reproduciendo bucle continuo", Color::Green),
+            _ => ("Loop Tester: inactivo", Color::Gray),
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                loop_text,
+                Style::default().fg(loop_color).add_modifier(Modifier::BOLD),
+            ))),
+            loop_cols[0],
+        );
+
+        let btn_label = if self.state.loop_test_state == "idle" {
+            "● Grabar bucle 8s (L)"
+        } else {
+            "■ Parar bucle (L)"
+        };
+        self.draw_button(
+            frame,
+            loop_cols[1],
+            btn_label,
+            Action::ToggleLoopRecord,
+            true,
+        );
+
+        // Detalles de Stream PipeWire
+        let input_desc = self
+            .state
+            .selected_input_description
+            .clone()
+            .or_else(|| self.state.selected_input.clone())
+            .unwrap_or_else(|| "(ninguna)".into());
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(format!("Dispositivo: {input_desc}")),
+                Line::from(format!(
+                    "Fuente virtual: {} · {} Hz · {} ch",
+                    self.state.virtual_source, self.state.sample_rate, self.state.channels
+                )),
+                Line::from(format!(
+                    "Buffer Quantum: {} frames · Xruns: {} · Overflows: {}",
+                    self.state.quantum, self.state.xruns, self.state.overflows
+                )),
+            ])
+            .style(Style::default().fg(Color::DarkGray)),
+            right_rows[3],
+        );
+
+        let error_msg = self
             .state
             .error
             .clone()
-            .map(|e| format!("ERROR: {e}"))
-            .unwrap_or_else(|| "Sin errores".into());
+            .map(|e| format!("AVISO: {e}"))
+            .unwrap_or_else(|| "Estado de audio PipeWire: normal, sin fallos".into());
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(format!(
-                    "Xruns {} · underruns {} · overflows {}",
-                    self.state.xruns, self.state.underruns, self.state.overflows
-                )),
-                Line::from(format!(
-                    "Bloques captura {} · playback {}",
-                    self.state.capture_blocks, self.state.playback_blocks
-                )),
-                Line::from(""),
-                Line::from(error),
-                Line::from(self.status.clone()),
-            ])
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Diagnóstico "),
-            ),
-            right[2],
+            Paragraph::new(error_msg).style(Style::default().fg(Color::Gray)),
+            right_rows[4],
         );
     }
+
+    // ==========================================
+    // PESTAÑA 4: CLONACIÓN DE VOCES (IA / NEURONAL)
+    // ==========================================
+
+    fn draw_clonacion(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Laboratorio de Clonación de Voces (Redes Neuronales / IA) ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Paso 1: Selección de muestra
+                Constraint::Length(3), // Paso 2: Inferencia & Embeddings
+                Constraint::Length(6), // Paso 3: Calibración y pulido
+                Constraint::Length(3), // Paso 4: Acciones (Preescuchar / Guardar)
+                Constraint::Min(2),    // Información y notas
+            ])
+            .split(inner);
+
+        // Paso 1: Muestra de Audio
+        let p1_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(rows[0]);
+
+        let path_text = if self.clone_session.source_path.as_os_str().is_empty() {
+            "(ninguna muestra cargada; usá los botones a la derecha)".to_string()
+        } else {
+            self.clone_session
+                .source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        };
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Paso 1: Muestra de la voz a clonar",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(format!("Audio: {path_text}")),
+            ]),
+            p1_cols[0],
+        );
+
+        self.draw_button(
+            frame,
+            p1_cols[1],
+            "📁 Cargar archivo WAV/MP3",
+            Action::OpenCloneFileInput,
+            true,
+        );
+
+        self.draw_button(
+            frame,
+            p1_cols[2],
+            "🎙 Grabar muestra (15s)",
+            Action::StartCloneRecording,
+            true,
+        );
+
+        // Paso 2: Estado de la Inferencia Neuronal
+        let (status_badge, status_color) = match self.clone_session.status {
+            CloneStatus::Idle => ("EN ESPERA", Color::DarkGray),
+            CloneStatus::Validating => ("VALIDANDO AUDIO...", Color::Yellow),
+            CloneStatus::Extracting => ("EXTRAYENDO EMBEDDINGS NEURONALES...", Color::Yellow),
+            CloneStatus::Ready => ("MUESTRA PROCESADA Y LISTA", Color::Green),
+            CloneStatus::Synthesizing => ("SINTETIZANDO TIMBRE VOCAL...", Color::Cyan),
+            CloneStatus::Error => ("ERROR DE EXTRACCIÓN", Color::Red),
+        };
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Paso 2: Inferencia Neuronal ",
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" [{status_badge}] "),
+                        Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(format!(
+                    "Motor: {} · {}",
+                    self.clone_session.model_target, self.clone_session.status_message
+                )),
+            ]),
+            rows[1],
+        );
+
+        // Paso 3: Calibración y Afinación
+        let p3_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(rows[2]);
+
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "Paso 3: Calibración de Timbre y Afinación Fina",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            p3_rows[0],
+        );
+
+        self.draw_slider(
+            frame,
+            p3_rows[1],
+            "Afinación Tono (Pitch Target)",
+            self.clone_session.pitch_offset,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::ClonePitch,
+        );
+        self.draw_slider(
+            frame,
+            p3_rows[2],
+            "Escala de Formantes (Tracto Vocal)",
+            self.clone_session.formant_offset,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::CloneFormant,
+        );
+        self.draw_slider(
+            frame,
+            p3_rows[3],
+            "Mezcla de Similitud (Blend IA)",
+            self.clone_session.similarity_blend,
+            0.0,
+            1.0,
+            "",
+            SliderKind::CloneBlend,
+        );
+        self.draw_slider(
+            frame,
+            p3_rows[4],
+            "Limpieza de Ruido de Fondo",
+            self.clone_session.denoise_strength,
+            0.0,
+            1.0,
+            "",
+            SliderKind::CloneDenoise,
+        );
+
+        // Paso 4: Botones de Acción
+        let p4_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+            ])
+            .split(rows[3]);
+
+        self.draw_button(
+            frame,
+            p4_cols[0],
+            "▶ Preescuchar en bucle",
+            Action::TestCloneVoice,
+            true,
+        );
+        self.draw_button(
+            frame,
+            p4_cols[1],
+            "💾 Guardar como perfil de voz",
+            Action::OpenCloneSaveModal,
+            true,
+        );
+        self.draw_button(
+            frame,
+            p4_cols[2],
+            "✖ Descartar sesión",
+            Action::DiscardCloneSession,
+            true,
+        );
+
+        // Información adicional
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("💡 Podés cargar cualquier archivo de audio limpio o grabar tu voz para clonar."),
+                Line::from("   El extractor analiza los coeficientes acústicos y genera un perfil listo para usar en Discord / OBS."),
+            ])
+            .style(Style::default().fg(Color::DarkGray)),
+            rows[4],
+        );
+    }
+
+    // ==========================================
+    // PESTAÑA 5: AJUSTES & RESET DE CONFIGURACIÓN
+    // ==========================================
+
+    fn draw_ajustes(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Ajustes Globales y Manejo de Configuraciones ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5), // Rutas del sistema
+                Constraint::Length(1), // Título resets
+                Constraint::Length(2), // Botón Reset Fábrica Completo
+                Constraint::Length(2), // Botones resets específicos
+                Constraint::Length(1), // Título modelos
+                Constraint::Length(2), // Botón modelos
+                Constraint::Min(2),    // Control del daemon
+            ])
+            .split(inner);
+
+        // Rutas del sistema
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("Configuración: ", Style::default().fg(Color::Gray)),
+                    Span::raw(mvx_core::config_path().display().to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Presets:       ", Style::default().fg(Color::Gray)),
+                    Span::raw(mvx_core::presets_path().display().to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Modelos ONNX:  ", Style::default().fg(Color::Gray)),
+                    Span::raw(mvx_core::models_dir().display().to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled("IPC Socket:    ", Style::default().fg(Color::Gray)),
+                    Span::raw(socket_path().display().to_string()),
+                ]),
+            ]),
+            rows[0],
+        );
+
+        // Resets
+        frame.render_widget(
+            Paragraph::new("Restablecimiento de Configuraciones:")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            rows[1],
+        );
+
+        self.draw_button(
+            frame,
+            rows[2],
+            "⚠ Restablecer Configuración Completa de Fábrica (Reset Global)",
+            Action::OpenResetConfirm(ConfigResetTarget::All),
+            true,
+        );
+
+        let reset_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+            ])
+            .split(rows[3]);
+
+        self.draw_button(
+            frame,
+            reset_cols[0],
+            "↺ Reset Solo Audio / PipeWire",
+            Action::OpenResetConfirm(ConfigResetTarget::Audio),
+            true,
+        );
+
+        self.draw_button(
+            frame,
+            reset_cols[1],
+            "↺ Reset Solo Presets / Perfiles",
+            Action::OpenResetConfirm(ConfigResetTarget::Presets),
+            true,
+        );
+
+        self.draw_button(
+            frame,
+            reset_cols[2],
+            "↺ Reset Filtros DSP",
+            Action::OpenResetConfirm(ConfigResetTarget::Dsp),
+            true,
+        );
+
+        // Modelos
+        frame.render_widget(
+            Paragraph::new("Modelos Neuronales de Voz:")
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            rows[4],
+        );
+
+        let models_label = if self.state.models_installed {
+            "✓ Modelos Neuronales Instalados (CAM++ & Silero VAD)"
+        } else {
+            "⬇ Descargar e Instalar Modelos Neuronales (~30 MB)"
+        };
+        self.draw_button(frame, rows[5], models_label, Action::InstallModels, true);
+
+        // Control del daemon
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from("💡 Para apagar el servicio por completo podés presionar 'q' o ejecutar `mvx shutdown`."),
+            ])
+            .style(Style::default().fg(Color::DarkGray)),
+            rows[6],
+        );
+    }
+
+    // ==========================================
+    // FOOTER & MODALES
+    // ==========================================
 
     fn draw_footer(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let help = Line::from(vec![
             Span::styled(" q/Esc ", key_style()),
-            Span::raw("salir "),
-            Span::styled(" 1-4/Tab ", key_style()),
-            Span::raw("pestañas "),
-            Span::styled(" m ", key_style()),
-            Span::raw("mute "),
-            Span::styled(" b ", key_style()),
-            Span::raw("bypass "),
+            Span::raw("Salir "),
+            Span::styled(" 1-5/Tab ", key_style()),
+            Span::raw("Pestañas "),
             Span::styled(" s ", key_style()),
-            Span::raw("sidetone "),
-            Span::styled(" v ", key_style()),
-            Span::raw("mi voz "),
+            Span::raw("Escuchar voz "),
+            Span::styled(" m ", key_style()),
+            Span::raw("Mute "),
+            Span::styled(" b ", key_style()),
+            Span::raw("Bypass "),
             Span::styled(" l ", key_style()),
-            Span::raw("loop "),
-            Span::styled(" Espacio ", key_style()),
-            Span::raw("parar fx "),
+            Span::raw("Loop test "),
+            Span::styled(" n ", key_style()),
+            Span::raw("Nuevo perfil "),
             Span::styled(" +/- ", key_style()),
-            Span::raw("volumen"),
+            Span::raw("Volumen"),
         ]);
         let status = Line::from(vec![
-            Span::styled(" estado: ", Style::default().fg(Color::Gray)),
+            Span::styled(" Estado: ", Style::default().fg(Color::Gray)),
             Span::raw(self.status.clone()),
         ]);
         frame.render_widget(Paragraph::new(vec![help, status]), area);
@@ -3311,7 +3462,7 @@ impl App {
             return;
         };
         let area = frame.area();
-        let width = area.width.saturating_sub(10).clamp(30, 64);
+        let width = area.width.saturating_sub(10).clamp(36, 70);
         let height = 9;
         let rect = Rect::new(
             area.x + (area.width.saturating_sub(width)) / 2,
@@ -3320,43 +3471,55 @@ impl App {
             height,
         );
         frame.render_widget(Clear, rect);
+
+        let border_color = match modal {
+            Modal::ConfirmReset { .. } => Color::Red,
+            _ => Color::Cyan,
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", modal.title()))
-            .style(Style::default().bg(Color::Black));
+            .style(Style::default().bg(Color::Black).fg(border_color));
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
+
         let lines = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(2),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
             ])
             .split(inner);
+
         frame.render_widget(
             Paragraph::new(modal.hint())
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(Color::White))
                 .wrap(Wrap { trim: true }),
             lines[0],
         );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Cyan)),
-                Span::raw(modal.value().to_string()),
-                Span::styled("▏", Style::default().fg(Color::Cyan)),
-            ]))
-            .style(Style::default().fg(Color::White)),
-            lines[2],
-        );
+
+        if !matches!(modal, Modal::ConfirmReset { .. }) {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::Cyan)),
+                    Span::raw(modal.value().to_string()),
+                    Span::styled("▏", Style::default().fg(Color::Cyan)),
+                ]))
+                .style(Style::default().fg(Color::White)),
+                lines[2],
+            );
+        }
+
         let buttons = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(lines[4]);
-        self.draw_button(frame, buttons[0], "Cancelar", Action::ModalCancel, true);
-        self.draw_button(frame, buttons[1], "Confirmar", Action::ModalSubmit, true);
+            .split(lines[3]);
+
+        self.draw_button(frame, buttons[0], "Cancelar (Esc)", Action::ModalCancel, true);
+        self.draw_button(frame, buttons[1], "Confirmar (Enter)", Action::ModalSubmit, true);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3372,19 +3535,23 @@ impl App {
         kind: SliderKind,
     ) {
         let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0) as f64;
-        let label = match unit {
+        let formatted_label = match unit {
             "dB" | "st" => format!("{label}: {value:+.1} {unit}"),
             "Hz" | "ms" => format!("{label}: {value:.0} {unit}"),
             ":1" => format!("{label}: {value:.1}:1"),
-            _ => format!("{label}: {value:.2}"),
+            "" => format!("{label}: {value:.2}"),
+            _ => format!("{label}: {value:.2} {unit}"),
         };
         frame.render_widget(
-            Gauge::default().ratio(ratio).label(label).gauge_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Gauge::default()
+                .ratio(ratio)
+                .label(formatted_label)
+                .gauge_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
             area,
         );
         self.register(area, Action::Slider(kind));
