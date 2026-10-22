@@ -1247,15 +1247,27 @@ impl Engine {
                 let frames = slice.len() / stride;
 
                 let target = 2 * data.quantum;
+                let max_prefill = 4 * data.quantum;
                 let slots = data.consumer.slots();
                 if !data.primed {
                     if slots < target {
                         for b in slice.iter_mut() {
                             *b = 0;
                         }
+                        let chunk = data_buf.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = stride as _;
+                        *chunk.size_mut() = (stride * frames) as _;
                         return;
                     }
                     data.primed = true;
+                } else if slots > max_prefill {
+                    let excess = slots.saturating_sub(target);
+                    for _ in 0..excess {
+                        let _ = data.consumer.pop();
+                    }
+                } else if slots == 0 {
+                    data.primed = false;
                 }
 
                 for frame in 0..frames {
@@ -1267,6 +1279,10 @@ impl Engine {
                         slice[start..start + 4].copy_from_slice(&bytes);
                     }
                 }
+                let chunk = data_buf.chunk_mut();
+                *chunk.offset_mut() = 0;
+                *chunk.stride_mut() = stride as _;
+                *chunk.size_mut() = (stride * frames) as _;
             })
             .register()
             .context("no se pudo registrar el listener de monitor")?;
@@ -1564,6 +1580,7 @@ fn create_virtual_source(
             "media.class" => "Audio/Source/Virtual",
             "audio.position" => "FL,FR",
             "audio.channels" => "2",
+            "node.always-process" => "true",
         };
         if lock_quantum {
             props.insert("node.force-quantum", quantum.max(1).to_string());
@@ -1591,6 +1608,9 @@ fn create_virtual_source(
             "el nodo virtual no fue publicado por PipeWire (¿existe la factory adapter?)"
         ));
     }
+    let _ = std::process::Command::new("wpctl")
+        .args(["set-default", &id.to_string()])
+        .status();
     debug!("micrófono virtual {} listo con id {}", name, id);
     Ok((Some(node), Some(listener), id))
 }
