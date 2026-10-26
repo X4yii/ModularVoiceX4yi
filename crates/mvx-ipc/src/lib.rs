@@ -32,6 +32,7 @@ pub enum Request {
     CloneVoiceValidate { audio_path: String },
     CloneVoiceSave { session: mvx_core::VoiceCloneSession },
     InstallModels,
+    ReloadAudio,
     Ping,
     Shutdown,
 }

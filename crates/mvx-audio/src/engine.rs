@@ -1245,10 +1245,17 @@ impl Engine {
                 let stride = std::mem::size_of::<f32>() * channels;
                 let Some(slice) = data_buf.data() else { return };
                 let frames = slice.len() / stride;
+                if frames == 0 {
+                    return;
+                }
 
-                let target = 2 * data.quantum;
-                let max_prefill = 4 * data.quantum;
+                // Adaptive jitter buffer: target at least the requested block size
+                // plus headroom to prevent underruns when the sink (e.g. Bluetooth)
+                // runs at a larger quantum (e.g. 1024 frames) than capture (256 frames).
+                let target = frames.max(data.quantum * 2);
+                let max_prefill = (target * 3).min(RING_CAPACITY / 2);
                 let slots = data.consumer.slots();
+
                 if !data.primed {
                     if slots < target {
                         for b in slice.iter_mut() {
@@ -1266,8 +1273,6 @@ impl Engine {
                     for _ in 0..excess {
                         let _ = data.consumer.pop();
                     }
-                } else if slots == 0 {
-                    data.primed = false;
                 }
 
                 for frame in 0..frames {
@@ -1371,21 +1376,28 @@ impl Engine {
                 let channels = data.channels.max(1);
                 let stride = std::mem::size_of::<f32>() * channels;
                 let Some(slice) = data_buf.data() else { return };
+                let frames = slice.len() / stride;
+                if frames == 0 {
+                    return;
+                }
+
                 // The capture side may fill the ring before the first playback
                 // callback runs. Keep only a small, bounded pre-roll so the
                 // bridge starts at low latency instead of inheriting the whole
                 // ring as latency. The ring buffer stores mono frames.
-                let target = 2 * data.quantum;
-                let max_prefill = 4 * data.quantum;
+                let target = frames.max(data.quantum * 2);
+                let max_prefill = (target * 3).min(RING_CAPACITY / 2);
                 let slots = data.consumer.slots();
                 if !data.primed {
                     if slots < target {
-                        // Wait until buffer is primed with initial target frames
-                        let frames = slice.len() / stride;
                         data.shared.inc_playback_block(frames);
                         for b in slice.iter_mut() {
                             *b = 0;
                         }
+                        let chunk = data_buf.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = stride as _;
+                        *chunk.size_mut() = (stride * frames) as _;
                         return;
                     }
                     data.primed = true;
@@ -1395,7 +1407,6 @@ impl Engine {
                         let _ = data.consumer.pop();
                     }
                 }
-                let frames = slice.len() / stride;
                 data.shared.inc_playback_block(frames);
                 data.shared.set_ring_fill(data.consumer.slots());
                 let mut underrun = false;
@@ -1608,9 +1619,6 @@ fn create_virtual_source(
             "el nodo virtual no fue publicado por PipeWire (¿existe la factory adapter?)"
         ));
     }
-    let _ = std::process::Command::new("wpctl")
-        .args(["set-default", &id.to_string()])
-        .status();
     debug!("micrófono virtual {} listo con id {}", name, id);
     Ok((Some(node), Some(listener), id))
 }

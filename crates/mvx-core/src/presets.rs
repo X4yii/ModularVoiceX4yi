@@ -891,23 +891,23 @@ pub fn builtin_presets() -> Vec<Preset> {
             id: PRESET_ARDILLA.into(),
             name: "Voz de ardilla".into(),
             builtin: true,
-            pitch_semitones: 10.5,
-            formant_semitones: 8.0,
-            quality: Quality::Ultra,
+            pitch_semitones: 10.0,
+            formant_semitones: 4.5,
+            quality: Quality::Balanced,
             filters: vec![
                 FilterConfig::HighPass {
                     enabled: true,
-                    cutoff_hz: 140.0,
+                    cutoff_hz: 120.0,
                 },
                 FilterConfig::Equalizer {
                     enabled: true,
-                    low_db: -6.0,
-                    mid_db: 2.0,
-                    high_db: 4.0,
+                    low_db: -4.0,
+                    mid_db: 1.0,
+                    high_db: 2.0,
                 },
                 FilterConfig::Gain {
                     enabled: true,
-                    gain_db: 1.0,
+                    gain_db: 0.0,
                 },
             ],
         },
@@ -1274,9 +1274,9 @@ mod tests {
             .into_iter()
             .find(|preset| preset.id == PRESET_ARDILLA)
             .unwrap();
-        assert_eq!(squirrel.pitch_semitones, 10.5);
-        assert_eq!(squirrel.formant_semitones, 8.0);
-        assert_eq!(squirrel.quality, Quality::Ultra);
+        assert_eq!(squirrel.pitch_semitones, 10.0);
+        assert_eq!(squirrel.formant_semitones, 4.5);
+        assert_eq!(squirrel.quality, Quality::Balanced);
     }
 
     #[test]

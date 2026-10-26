@@ -82,8 +82,8 @@ enum CtlAction {
         #[arg(default_value = "toggle")]
         action: String,
     },
-    /// Fijar microfono virtual MVX como entrada por defecto del sistema.
-    SetDefaultSource,
+    /// Recargar la ruta de audio PipeWire.
+    ReloadAudio,
 }
 
 #[derive(Debug, Subcommand)]
@@ -221,9 +221,9 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                CtlAction::SetDefaultSource => {
-                    set_system_default_source();
-                    println!("Microfono MVX configurado como entrada por defecto del sistema.");
+                CtlAction::ReloadAudio => {
+                    let _ = client.request(&Request::ReloadAudio)?;
+                    println!("Audio PipeWire recargado.");
                 }
             }
             Ok(())
@@ -256,27 +256,6 @@ fn main() -> Result<()> {
     }
 }
 
-fn set_system_default_source() {
-    let output = Command::new("pw-cli")
-        .args(["info", "mvx_mic"])
-        .output()
-        .ok();
-    if let Some(out) = output {
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            if line.trim().starts_with("id:") {
-                if let Some(id_str) = line.split(':').nth(1) {
-                    let id = id_str.trim();
-                    let _ = Command::new("wpctl").args(["set-default", id]).status();
-                    return;
-                }
-            }
-        }
-    }
-    let _ = Command::new("wpctl")
-        .args(["set-default", "mvx_mic"])
-        .status();
-}
 
 fn connect_or_start() -> Result<Client> {
     let path = socket_path();
@@ -464,7 +443,7 @@ enum Action {
     EnrollVoice,
     InstallModels,
     Rescan,
-    SetDefaultSource,
+    ReloadAudio,
     SelectDevice(usize),
     // Reset Target
     OpenResetConfirm(ConfigResetTarget),
@@ -1175,9 +1154,9 @@ impl App {
                 self.send(Request::GetState);
                 self.status = "Dispositivos actualizados".into();
             }
-            Action::SetDefaultSource => {
-                set_system_default_source();
-                self.status = "Microfono MVX fijado como entrada por defecto".into();
+            Action::ReloadAudio => {
+                self.send(Request::ReloadAudio);
+                self.status = "Ruta de audio recargada".into();
             }
             Action::SelectDevice(index) => self.select_device(index),
             Action::OpenResetConfirm(target) => {
@@ -2806,8 +2785,8 @@ impl App {
             self.draw_button(
                 frame,
                 btn_cols[1],
-                "Fijar mic por defecto",
-                Action::SetDefaultSource,
+                "Recargar audio",
+                Action::ReloadAudio,
                 true,
             );
         }
@@ -2930,17 +2909,20 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(format!("Dispositivo: {input_desc}")),
+                Line::from(vec![
+                    Span::styled("Entrada hardware: ", Style::default().fg(Color::Cyan)),
+                    Span::raw(input_desc),
+                ]),
+                Line::from(vec![
+                    Span::styled("Salida virtual:   ", Style::default().fg(Color::Green)),
+                    Span::raw(format!("{} (Audio/Source/Virtual para Discord/OBS/Meet)", self.state.virtual_source)),
+                ]),
                 Line::from(format!(
-                    "Virtual: {} | {} Hz | {} ch",
-                    self.state.virtual_source, self.state.sample_rate, self.state.channels
-                )),
-                Line::from(format!(
-                    "Quantum: {} frames | Xruns: {} | Overflows: {}",
-                    self.state.quantum, self.state.xruns, self.state.overflows
+                    "PipeWire: {} Hz | {} ch | Quantum: {} frames | Xruns: {}",
+                    self.state.sample_rate, self.state.channels, self.state.quantum, self.state.xruns
                 )),
             ])
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(Color::Gray)),
             right_rows[3],
         );
     }

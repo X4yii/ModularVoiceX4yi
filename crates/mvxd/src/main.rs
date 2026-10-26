@@ -263,6 +263,10 @@ fn handle_client(
                     Response::Ok
                 }
             }
+            Request::ReloadAudio => match sender.send(AudioCommand::ReloadAudio) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
             Request::Ping => Response::Pong,
             Request::Shutdown => {
                 let _ = sender.send(AudioCommand::Shutdown);
