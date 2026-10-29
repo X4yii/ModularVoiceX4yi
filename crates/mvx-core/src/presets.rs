@@ -899,6 +899,10 @@ pub fn builtin_presets() -> Vec<Preset> {
                     enabled: true,
                     cutoff_hz: 120.0,
                 },
+                FilterConfig::NoiseReduction {
+                    enabled: true,
+                    strength: 0.75,
+                },
                 FilterConfig::Equalizer {
                     enabled: true,
                     low_db: -4.0,

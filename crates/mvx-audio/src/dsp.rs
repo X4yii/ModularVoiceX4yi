@@ -79,6 +79,8 @@ pub struct DspChain {
     distortion: Option<Distortion>,
     reverb: Option<Reverb>,
     humanizer: Option<Humanizer>,
+    subsonic_filter: Biquad,
+    krisp_expander: DownwardExpander,
     spectrum: SpectrumAnalyzer,
     last_metrics: DspMetrics,
 }
@@ -206,6 +208,8 @@ impl DspChain {
             distortion,
             reverb,
             humanizer,
+            subsonic_filter: Biquad::high_pass(85.0, SAMPLE_RATE, 0.707),
+            krisp_expander: DownwardExpander::new(-38.0, 3.0, 1.5, 60.0, 40.0, SAMPLE_RATE),
             spectrum: SpectrumAnalyzer::new(SAMPLE_RATE),
             last_metrics: DspMetrics::default(),
         })
@@ -371,13 +375,20 @@ impl DspChain {
             let len = (total - pos).min(MAX_CHUNK);
             let src = &input[pos..pos + len];
 
-            // 1. High-Pass Filter (limpieza subsónica)
-            if let Some(hpf) = self.high_pass.as_mut() {
+            // 0. Pre-filtro subsónico dedicado (85 Hz) si la reducción de ruido está activa
+            if noise_on {
                 for (dst, &s) in self.scratch[..len].iter_mut().zip(src.iter()) {
-                    *dst = hpf.process(s);
+                    *dst = self.subsonic_filter.process(s);
                 }
             } else {
                 self.scratch[..len].copy_from_slice(src);
+            }
+
+            // 1. High-Pass Filter del preset (si se configuró corte creativo más alto)
+            if let Some(hpf) = self.high_pass.as_mut() {
+                for s in self.scratch[..len].iter_mut() {
+                    *s = hpf.process(*s);
+                }
             }
 
             // 2. Noise Gate con histéresis
@@ -473,6 +484,18 @@ impl DspChain {
                     *dst = *src * gain;
                 }
             }
+
+            // 9. Expansor Descendente Inteligente estilo Krisp:
+            // Elimina el siseo residual y ruido de fondo en reposo / pausas cuando la reducción de ruido está activa.
+            if noise_on {
+                for s in output[pos..pos + len].iter_mut() {
+                    let (cleaned, red_db) = self.krisp_expander.process_sample(*s);
+                    *s = cleaned;
+                    if red_db > max_gate_red {
+                        max_gate_red = red_db;
+                    }
+                }
+            }
             pos += len;
         }
 
@@ -540,6 +563,9 @@ struct NoiseReducer {
     strength: Arc<AtomicU32>,
     current_strength: f32,
     wet: [f32; NOISE_FRAME],
+    scale_env: f32,
+    vad_smoothed: f32,
+    hangover_frames: usize,
 }
 
 impl NoiseReducer {
@@ -557,6 +583,9 @@ impl NoiseReducer {
             strength: control,
             current_strength: strength,
             wet: [0.0; NOISE_FRAME],
+            scale_env: 0.05,
+            vad_smoothed: 1.0,
+            hangover_frames: 20,
         }
     }
 
@@ -569,12 +598,19 @@ impl NoiseReducer {
             self.input_pos += 1;
             if self.input_pos == NOISE_FRAME {
                 self.input_pos = 0;
-                // RNNoise expects values around i16 full scale.
-                for (dst, src) in self.wet.iter_mut().zip(self.input.iter()) {
-                    *dst = *src * 32768.0;
+
+                // Dynamic scale tracking so RNNoise processes at optimal full-scale resolution (~16k)
+                let frame_peak = self.input.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                self.scale_env = self.scale_env.max(frame_peak * 0.8 + self.scale_env * 0.2).max(0.005);
+                let boost = (16384.0 / self.scale_env).clamp(4096.0, 65536.0);
+
+                let mut input_i16 = [0.0f32; NOISE_FRAME];
+                for (dst, src) in input_i16.iter_mut().zip(self.input.iter()) {
+                    *dst = (*src * boost).clamp(-32767.0, 32767.0);
                 }
-                let input_i16 = self.input.map(|v| v * 32768.0);
-                self.state.process_frame(&mut self.wet, &input_i16);
+                self.wet.copy_from_slice(&input_i16);
+                let vad_prob = self.state.process_frame(&mut self.wet, &input_i16);
+
                 let target = f32::from_bits(self.strength.load(Ordering::Relaxed)).clamp(0.0, 1.0);
                 smooth_toward(
                     &mut self.current_strength,
@@ -583,12 +619,34 @@ impl NoiseReducer {
                     GAIN_SMOOTH_SECONDS,
                 );
                 let strength = self.current_strength;
-                let mut mixed = [0.0f32; NOISE_FRAME];
-                for (index, (wet, dry)) in self.wet.iter().zip(self.input.iter()).enumerate() {
-                    mixed[index] = *wet / 32768.0 * strength + *dry * (1.0 - strength);
+
+                // Krisp-style neural VAD gate: when neural net detects only noise,
+                // suppress floor by up to 36 dB without clipping word endings.
+                if vad_prob > 0.35 {
+                    self.hangover_frames = 12; // 120 ms hangover for natural decays
+                    self.vad_smoothed = self.vad_smoothed.max(vad_prob);
+                } else if self.hangover_frames > 0 {
+                    self.hangover_frames -= 1;
+                    self.vad_smoothed = (self.vad_smoothed * 0.95).max(0.4);
+                } else {
+                    self.vad_smoothed = self.vad_smoothed * 0.8 + vad_prob * 0.2;
                 }
-                for sample in mixed {
-                    self.push(sample);
+
+                let voice_floor = if self.vad_smoothed >= 0.30 || strength < 0.1 {
+                    1.0
+                } else {
+                    let t = (self.vad_smoothed / 0.30).max(0.0);
+                    // Smooth transition to -36 dB floor (gain 0.015)
+                    0.015 + 0.985 * (t * t)
+                };
+
+                let dry_leak = (1.0 - strength) * (1.0 - strength); // Stops background hiss leakage
+
+                for index in 0..NOISE_FRAME {
+                    let clean = (self.wet[index] / boost) * voice_floor;
+                    let dry = self.input[index] * voice_floor;
+                    let mixed = clean * strength + dry * dry_leak;
+                    self.push(mixed);
                 }
             }
         }
@@ -832,6 +890,71 @@ impl NoiseGate {
             0.0
         };
 
+        (sample * self.gain, reduction_db)
+    }
+}
+
+/// Downward expander for smooth, natural noise-floor suppression (Krisp-style).
+/// Unlike a hard gate, it attenuates progressively below threshold without clicks or clipping words.
+pub struct DownwardExpander {
+    threshold_db: f32,
+    ratio: f32,
+    attack_coeff: f32,
+    release_coeff: f32,
+    max_attenuation_db: f32,
+    env: f32,
+    gain: f32,
+}
+
+impl DownwardExpander {
+    pub fn new(
+        threshold_db: f32,
+        ratio: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        max_attenuation_db: f32,
+        sample_rate: f32,
+    ) -> Self {
+        let attack_coeff = 1.0 - (-1.0 / (attack_ms.max(0.1) * 0.001 * sample_rate)).exp();
+        let release_coeff = 1.0 - (-1.0 / (release_ms.max(1.0) * 0.001 * sample_rate)).exp();
+        Self {
+            threshold_db,
+            ratio: ratio.max(1.0),
+            attack_coeff,
+            release_coeff,
+            max_attenuation_db: max_attenuation_db.abs(),
+            env: 0.0,
+            gain: 1.0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn process_sample(&mut self, sample: f32) -> (f32, f32) {
+        let abs = sample.abs();
+        let coeff = if abs > self.env {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.env += (abs - self.env) * coeff;
+
+        let env_db = 20.0 * (self.env.max(1e-5)).log10();
+        let target_gain = if env_db < self.threshold_db {
+            let under_db = self.threshold_db - env_db;
+            let atten_db = (under_db * (self.ratio - 1.0)).min(self.max_attenuation_db);
+            10f32.powf(-atten_db / 20.0)
+        } else {
+            1.0
+        };
+
+        let g_coeff = if target_gain > self.gain {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gain += (target_gain - self.gain) * g_coeff;
+
+        let reduction_db = 20.0 * (self.gain.max(1e-4)).log10().abs();
         (sample * self.gain, reduction_db)
     }
 }
@@ -1485,5 +1608,30 @@ mod tests {
         let out = dist.process_sample(0.5);
         // Without distortion, 0.5; with drive 5.0, x=2.5, saturated < 1.0
         assert!(out > 0.6 && out <= 1.0);
+    }
+
+    #[test]
+    fn downward_expander_cleans_noise_floor() {
+        let mut expander = DownwardExpander::new(-38.0, 3.0, 1.5, 60.0, 40.0, SAMPLE_RATE);
+
+        // Strong speech signal at -15 dB (amp ~0.18) should pass unattenuated (gain = 1.0)
+        let mut last_gain = 0.0f32;
+        for _ in 0..2000 {
+            let (out, red) = expander.process_sample(0.18);
+            last_gain = out / 0.18;
+            let _ = red;
+        }
+        assert!((last_gain - 1.0).abs() < 0.05, "speech signal should pass transparently");
+
+        // Noise floor at -50 dB (amp ~0.003) should be heavily attenuated
+        let mut noise_out = 0.0f32;
+        let mut noise_red = 0.0f32;
+        for _ in 0..30000 {
+            let (out, red) = expander.process_sample(0.003);
+            noise_out = out;
+            noise_red = red;
+        }
+        assert!(noise_red > 15.0, "noise floor should suffer downward expansion (>15 dB reduction, got {noise_red})");
+        assert!(noise_out < 0.001, "noise floor amplitude should drop significantly");
     }
 }
