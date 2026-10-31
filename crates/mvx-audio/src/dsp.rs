@@ -6,14 +6,14 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use nnnoiseless::{DenoiseState, FRAME_SIZE};
+use deep_filter_rt::tract::DfTract;
+use ndarray::Array2;
 use signalsmith_stretch::Stretch;
 
 use mvx_core::{Preset, Quality, SpeakerGate};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 const MAX_CHUNK: usize = 8_192;
-const NOISE_FRAME: usize = FRAME_SIZE;
 const CONTROL_SMOOTH_SECONDS: f32 = 0.025;
 const GAIN_SMOOTH_SECONDS: f32 = 0.020;
 const TONALITY_LIMIT: f32 = 8_000.0 / 48_000.0;
@@ -46,7 +46,7 @@ pub struct DspParams {
 
 pub struct DspChain {
     stretch: Stretch,
-    noise: NoiseReducer,
+    noise: DeepFilterReducer,
     gate: Option<SpeakerGate>,
     gate_delay: Vec<f32>,
     gate_pos: usize,
@@ -101,7 +101,7 @@ impl DspChain {
         };
 
         let initial_noise = params.noise_reduction.unwrap_or(0.75);
-        let noise = NoiseReducer::new(initial_noise, params.noise_strength.clone());
+        let noise = DeepFilterReducer::new(initial_noise, params.noise_strength.clone());
 
         // Max lookahead 300 ms (14400 samples at 48 kHz).
         let max_lookahead_samples = 300 * SAMPLE_RATE as usize / 1000;
@@ -109,7 +109,7 @@ impl DspChain {
 
         let mut latency_ms = params.quality.latency_ms();
         if params.noise_reduction.is_some() {
-            latency_ms += NOISE_FRAME as f32 * 1000.0 / SAMPLE_RATE;
+            latency_ms += noise.delay_ms();
         }
 
         let attack = 1.0 - (-1.0 / (0.020 * SAMPLE_RATE)).exp();
@@ -549,104 +549,84 @@ impl DspChain {
     }
 }
 
-/// RNNoise works with 480-sample frames and expects i16-scale floats.
-/// The wrapper delays by one frame so the returned stream has the same length
-/// as the input stream.
-struct NoiseReducer {
-    state: Box<DenoiseState<'static>>,
-    input: [f32; NOISE_FRAME],
+const DF_HOP_SIZE: usize = 480;
+
+/// DeepFilterNet3 real-time speech enhancement engine.
+/// Runs full deep-filtering neural network on CPU with embedded weights.
+struct DeepFilterReducer {
+    df: DfTract,
+    input_buf: [f32; DF_HOP_SIZE],
     input_pos: usize,
-    queue: [f32; NOISE_FRAME * 2],
+    queue: Vec<f32>,
     queue_read: usize,
     queue_write: usize,
     queue_len: usize,
+    noisy_view: Array2<f32>,
+    enh_view: Array2<f32>,
     strength: Arc<AtomicU32>,
-    current_strength: f32,
-    wet: [f32; NOISE_FRAME],
-    scale_env: f32,
-    vad_smoothed: f32,
-    hangover_frames: usize,
+    delay_samples: usize,
+    last_lsnr: f32,
 }
 
-impl NoiseReducer {
+impl DeepFilterReducer {
     fn new(strength: f32, control: Arc<AtomicU32>) -> Self {
-        let strength = strength.clamp(0.0, 1.0);
+        let df = DfTract::default();
+        let delay_samples = df.delay();
+        let queue_capacity = delay_samples + DF_HOP_SIZE * 4;
+        let queue = vec![0.0f32; queue_capacity];
+
+        // Pre-fill queue with delay silence to maintain 1:1 steady-state stream
+        let queue_len = delay_samples;
+        let queue_write = delay_samples % queue_capacity;
+
         control.store(strength.to_bits(), Ordering::Relaxed);
+
         Self {
-            state: DenoiseState::new(),
-            input: [0.0; NOISE_FRAME],
+            df,
+            input_buf: [0.0f32; DF_HOP_SIZE],
             input_pos: 0,
-            queue: [0.0; NOISE_FRAME * 2],
+            queue,
             queue_read: 0,
-            queue_write: 0,
-            queue_len: 0,
+            queue_write,
+            queue_len,
+            noisy_view: Array2::<f32>::zeros((1, DF_HOP_SIZE)),
+            enh_view: Array2::<f32>::zeros((1, DF_HOP_SIZE)),
             strength: control,
-            current_strength: strength,
-            wet: [0.0; NOISE_FRAME],
-            scale_env: 0.05,
-            vad_smoothed: 1.0,
-            hangover_frames: 20,
+            delay_samples,
+            last_lsnr: 0.0,
         }
     }
 
+    pub fn delay_ms(&self) -> f32 {
+        self.delay_samples as f32 * 1000.0 / SAMPLE_RATE
+    }
+
     fn process(&mut self, input: &[f32], output: &mut [f32]) {
-        for (i, sample) in input.iter().copied().enumerate() {
-            // Pop before accumulating so the first frame is delayed by a full
-            // 480 samples. The output rate stays equal to the input rate.
+        let strength = f32::from_bits(self.strength.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+        let max_atten_db = 15.0 + 85.0 * strength;
+        self.df.set_atten_lim(max_atten_db);
+
+        for (i, &sample) in input.iter().enumerate() {
             output[i] = self.pop();
-            self.input[self.input_pos] = sample;
+            self.input_buf[self.input_pos] = sample;
             self.input_pos += 1;
-            if self.input_pos == NOISE_FRAME {
+
+            if self.input_pos == DF_HOP_SIZE {
                 self.input_pos = 0;
-
-                // Dynamic scale tracking so RNNoise processes at optimal full-scale resolution (~16k)
-                let frame_peak = self.input.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                self.scale_env = self.scale_env.max(frame_peak * 0.8 + self.scale_env * 0.2).max(0.005);
-                let boost = (16384.0 / self.scale_env).clamp(4096.0, 65536.0);
-
-                let mut input_i16 = [0.0f32; NOISE_FRAME];
-                for (dst, src) in input_i16.iter_mut().zip(self.input.iter()) {
-                    *dst = (*src * boost).clamp(-32767.0, 32767.0);
-                }
-                self.wet.copy_from_slice(&input_i16);
-                let vad_prob = self.state.process_frame(&mut self.wet, &input_i16);
-
-                let target = f32::from_bits(self.strength.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-                smooth_toward(
-                    &mut self.current_strength,
-                    target,
-                    NOISE_FRAME,
-                    GAIN_SMOOTH_SECONDS,
-                );
-                let strength = self.current_strength;
-
-                // Krisp-style neural VAD gate: when neural net detects only noise,
-                // suppress floor by up to 36 dB without clipping word endings.
-                if vad_prob > 0.35 {
-                    self.hangover_frames = 12; // 120 ms hangover for natural decays
-                    self.vad_smoothed = self.vad_smoothed.max(vad_prob);
-                } else if self.hangover_frames > 0 {
-                    self.hangover_frames -= 1;
-                    self.vad_smoothed = (self.vad_smoothed * 0.95).max(0.4);
-                } else {
-                    self.vad_smoothed = self.vad_smoothed * 0.8 + vad_prob * 0.2;
+                for idx in 0..DF_HOP_SIZE {
+                    self.noisy_view[[0, idx]] = self.input_buf[idx];
                 }
 
-                let voice_floor = if self.vad_smoothed >= 0.30 || strength < 0.1 {
-                    1.0
+                if let Ok(lsnr) = self.df.process(self.noisy_view.view(), self.enh_view.view_mut()) {
+                    self.last_lsnr = lsnr;
+                    for idx in 0..DF_HOP_SIZE {
+                        let clean = self.enh_view[[0, idx]];
+                        self.push(clean);
+                    }
                 } else {
-                    let t = (self.vad_smoothed / 0.30).max(0.0);
-                    // Smooth transition to -36 dB floor (gain 0.015)
-                    0.015 + 0.985 * (t * t)
-                };
-
-                let dry_leak = (1.0 - strength) * (1.0 - strength); // Stops background hiss leakage
-
-                for index in 0..NOISE_FRAME {
-                    let clean = (self.wet[index] / boost) * voice_floor;
-                    let dry = self.input[index] * voice_floor;
-                    let mixed = clean * strength + dry * dry_leak;
-                    self.push(mixed);
+                    for idx in 0..DF_HOP_SIZE {
+                        self.push(self.input_buf[idx]);
+                    }
                 }
             }
         }
@@ -654,8 +634,6 @@ impl NoiseReducer {
 
     fn push(&mut self, sample: f32) {
         if self.queue_len == self.queue.len() {
-            // Should not happen at equal input/output rates, but never
-            // overwrite unread audio if it does.
             return;
         }
         self.queue[self.queue_write] = sample;
@@ -1373,14 +1351,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn noise_reducer_has_one_frame_latency_and_same_length() {
-        let mut reducer = NoiseReducer::new(1.0, Arc::new(AtomicU32::new(1.0f32.to_bits())));
-        let input = vec![0.25; NOISE_FRAME * 3];
+    fn deep_filter_reducer_has_delay_latency_and_same_length() {
+        let mut reducer = DeepFilterReducer::new(1.0, Arc::new(AtomicU32::new(1.0f32.to_bits())));
+        let delay = reducer.delay_samples;
+        let input = vec![0.25; DF_HOP_SIZE * 6];
         let mut output = vec![0.0; input.len()];
         reducer.process(&input, &mut output);
         assert_eq!(output.len(), input.len());
-        assert!(output[..NOISE_FRAME].iter().all(|v| *v == 0.0));
-        assert!(output[NOISE_FRAME..].iter().any(|v| *v != 0.0));
+        assert!(output[..delay].iter().all(|v| *v == 0.0));
+        assert!(output[delay..].iter().any(|v| *v != 0.0));
     }
 
     #[test]
@@ -1633,5 +1612,23 @@ mod tests {
         }
         assert!(noise_red > 15.0, "noise floor should suffer downward expansion (>15 dB reduction, got {noise_red})");
         assert!(noise_out < 0.001, "noise floor amplitude should drop significantly");
+    }
+
+    #[test]
+    fn deep_filter_net_inference_runs() {
+        use deep_filter_rt::tract::DfTract;
+        use ndarray::Array2;
+
+        let mut df = DfTract::default();
+        let hop = df.hop_size;
+        let mut noisy = Array2::<f32>::zeros((1, hop));
+        let mut enh = Array2::<f32>::zeros((1, hop));
+
+        for i in 0..hop {
+            noisy[[0, i]] = (i as f32 * 0.1).sin() * 0.4 + 0.02;
+        }
+
+        let lsnr = df.process(noisy.view(), enh.view_mut()).unwrap();
+        assert!(lsnr.is_finite(), "lsnr should be finite, got {lsnr}");
     }
 }
