@@ -32,7 +32,7 @@ El daemon es dueño de todos los objetos PipeWire y del estado de presets. La TU
    - envía la señal cruda al ring del worker de hablante (si `Solo mi voz` está activo);
    - aplica la cadena DSP:
      - compuerta de hablante (con lookahead configurable);
-     - RNNoise opcional;
+     - DeepFilterNet3 opcional (Krisp-grade);
      - pitch/formantes con Signalsmith Stretch;
      - ganancia del preset;
      - ganancia maestra + mute;
@@ -110,7 +110,7 @@ Si el preset no tiene pitch ni formantes, Signalsmith se omite y no agrega laten
 - En esos callbacks **no** hay allocations, locks, logging ni syscalls.
 - La comunicación con la UI es por atómicos (`AtomicU32`/`AtomicU64`) y rings SPSC.
 - Los comandos de control llegan por `pw::channel` y se ejecutan en el hilo del main loop, nunca en el callback RT.
-- RNNoise procesa frames de 480 muestras y agrega un frame de latencia (10 ms) cuando está activo.
+- DeepFilterNet3 procesa frames de 480 muestras (10 ms) con lookahead de 2 frames (retardo total 30 ms) manteniendo streaming continuo 1:1.
 - El worker de hablante no toca el callback RT: consume un ring, resamplea, corre VAD/ONNX y publica un booleano en un `AtomicBool`.
 - Las perillas de pitch/formantes e intensidad de NR usan atómicos compartidos; el callback solo llama a los setters de Signalsmith o lee la intensidad cuando el valor cambió.
 - Umbral y hold de la compuerta se leen desde `SharedState` en cada análisis, fuera del RT.

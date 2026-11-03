@@ -32,7 +32,7 @@ latencia base + DSP = total
 | Signalsmith Ultra (1024) | 21.33 ms |
 | Signalsmith Equilibrado (2048) | 42.67 ms |
 | Signalsmith Alta (4096) | 85.33 ms |
-| RNNoise | 10 ms |
+| DeepFilterNet3 | 30 ms |
 | Compuerta de hablante (`lookahead_ms`) | 0–300 ms |
 | Limitador | 0 ms |
 | Ganancia / mute | 0 ms |

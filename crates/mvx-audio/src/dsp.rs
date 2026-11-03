@@ -402,7 +402,7 @@ impl DspChain {
                 }
             }
 
-            // 3. Reducción de ruido RNNoise
+            // 3. Supresion de ruido DeepFilterNet3 (Krisp-grade)
             if noise_on {
                 let mut tmp = [0.0f32; MAX_CHUNK];
                 tmp[..len].copy_from_slice(&self.scratch[..len]);

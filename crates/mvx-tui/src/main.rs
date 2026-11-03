@@ -2381,8 +2381,8 @@ impl App {
                 Constraint::Length(1), // Gate toggle
                 Constraint::Length(1), // Gate threshold
                 Constraint::Length(1), // Gate meter
-                Constraint::Length(1), // RNNoise toggle
-                Constraint::Length(1), // RNNoise strength
+                Constraint::Length(1), // DeepFilterNet3 toggle
+                Constraint::Length(1), // DeepFilterNet3 strength
                 Constraint::Length(1), // CAM++ toggle
                 Constraint::Length(1), // CAM++ threshold
                 Constraint::Length(1), // CAM++ actions
@@ -2443,19 +2443,19 @@ impl App {
             a_rows[4],
         );
 
-        // RNNoise
+        // DeepFilterNet3 (Krisp-grade)
         let nr = preset.noise_reduction();
         self.draw_toggle(
             frame,
             a_rows[5],
-            if nr.is_some() { "[x] RNNoise" } else { "[ ] RNNoise" },
+            if nr.is_some() { "[x] DeepFilterNet3" } else { "[ ] DeepFilterNet3" },
             Action::ToggleNoise,
             nr.is_some(),
         );
         self.draw_slider(
             frame,
             a_rows[6],
-            "Intensidad RNNoise",
+            "Intensidad DeepFilter",
             nr.unwrap_or(0.5),
             0.0,
             1.0,

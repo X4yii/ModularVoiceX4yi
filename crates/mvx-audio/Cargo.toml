@@ -12,7 +12,6 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-nnnoiseless.workspace = true
 deep-filter-rt = "0.2.0"
 ndarray = "0.17"
 sherpa-onnx.workspace = true

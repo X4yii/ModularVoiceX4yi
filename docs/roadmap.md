@@ -15,7 +15,7 @@
 - [x] Presets personalizados.
 - [x] Pitch/formantes independientes con Signalsmith Stretch.
 - [x] Calidad DSP (Ultra / Equilibrado / Alta).
-- [x] RNNoise opcional con intensidad.
+- [x] DeepFilterNet3 (Krisp-grade) con atenuación dinámica.
 - [x] Ganancia maestra + ganancia por preset.
 - [x] Limitador de seguridad.
 - [x] TUI con ratón, sliders, modales y teclado físico.
