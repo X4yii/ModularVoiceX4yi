@@ -53,6 +53,17 @@ enum CliCommand {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// Clonar una voz desde un archivo de audio (WAV, MP3, OGG, FLAC).
+    Clone {
+        /// Ruta al archivo de audio de muestra.
+        path: PathBuf,
+        /// Nombre para el preset de voz clonada.
+        #[arg(short, long, default_value = "Voz Clonada")]
+        name: String,
+        /// Activar el preset inmediatamente en mvxd.
+        #[arg(short, long, default_value_t = true)]
+        activate: bool,
+    },
     /// Solicitar a mvxd que se apague de forma limpia.
     Shutdown,
 }
@@ -246,6 +257,27 @@ fn main() -> Result<()> {
         }
         CliCommand::Doctor => doctor(),
         CliCommand::Models { action } => models_command(action),
+        CliCommand::Clone { path, name, activate } => {
+            let mut session = VoiceCloneSession::default();
+            session.name = name.clone();
+            session.validate_source(&path)?;
+            println!("Muestra cargada: {}", session.source_path.display());
+            println!("Duracion: {:.2} s", session.duration_secs);
+            println!("Pitch estimado: {:+.1} st", session.pitch_offset);
+            println!("Formantes estimados: {:+.1} st", session.formant_offset);
+            println!("Ecualizacion sugerida: Graves {:+.1}dB | Medios {:+.1}dB | Agudos {:+.1}dB", session.eq_low, session.eq_mid, session.eq_high);
+
+            let mut client = connect_or_start()?;
+            let preset = session.to_preset();
+            let preset_id = preset.id.clone();
+            client.upsert_preset(preset, activate)?;
+            let _ = client.clone_voice_save(session);
+            println!("Perfil clonado guardado como preset: «{}» (ID: {})", name, preset_id);
+            if activate {
+                println!("Preset activado en vivo en mvxd.");
+            }
+            Ok(())
+        }
         CliCommand::Shutdown => {
             let mut client =
                 Client::connect(&socket_path()).context("no se pudo conectar al daemon")?;

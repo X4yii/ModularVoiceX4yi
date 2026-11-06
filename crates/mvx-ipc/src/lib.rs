@@ -150,6 +150,14 @@ impl Client {
         }
     }
 
+    pub fn upsert_preset(&mut self, preset: Preset, activate: bool) -> anyhow::Result<()> {
+        match self.request(&Request::UpsertPreset { preset, activate })? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("respuesta inesperada: {other:?}"),
+        }
+    }
+
     pub fn trigger_sound(&mut self, id: String) -> anyhow::Result<()> {
         match self.request(&Request::TriggerSound { id })? {
             Response::Ok => Ok(()),
