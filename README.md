@@ -1,198 +1,81 @@
-# MVX · ModularVoiceX4yi (MVX 1.0 Pro)
+# MVX · ModularVoiceX4yi
 
-> **Modulador y Procesador de Voz Profesional de Estudio para GNU/Linux, nativo sobre PipeWire.**
+**Tu micrófono físico convertido en un estudio vocal en tiempo real sobre PipeWire.**
 
-MVX transforma tu micrófono físico en un **micrófono virtual de calidad de estudio** (`mvx_mic`) con latencia ultra-baja (<15ms), 100% libre de bloqueos en tiempo real, con Voice Lab completo, Sidetone (monitoreo en auriculares), Voice Tester Loop, Soundboard con ducking automático y verificación biométrica de voz ("Solo mi voz").
+MVX nace para cubrir un hueco clásico en Linux: modular la voz, limpiar ruido de fondo con redes neuronales, ecualizar, procesar la señal,  Corre como un daemon nativo en Rust (`mvxd`), expone un micrófono virtual (`mvx_mic`) y se controla desde una TUI rápida o por atajos de teclado.
 
----
+> [!NOTE]
+> **Proyecto construido con IA:** Tanto la arquitectura en Rust como el motor DSP, la integración ONNX y la documentación fueron desarrollados con asistencia de inteligencia artesanal, asi que no garantizo calidad en el codigo, sin embargo me esfuerszo para que corra bien.
 
-## Características Principales
+> [!WARNING]
+> **Clonación de voz en estado ALPHA:** La transferencia de timbre neuronal (OpenVoice V2) está en una etapa muy temprana. Es exigente con la CPU, añade latencia (~250 ms+) y el parecido varía según la muestra.
 
-### 🎙️ Voice Lab Profesional (Rack DSP en Tiempo Real)
-- **Pitch & Formant Shifter:** Modulación independiente de tono y tamaño de garganta con Signalsmith Stretch.
-- **Filtro Paso Alto (HPF):** Corte ajustable (20–300 Hz) para eliminar golpes de mesa y ruidos por debajo del rango vocal.
-- **Puerta de Ruido de Estudio (Noise Gate):** Umbral configurable (-60 a 0 dB) con histéresis, attack de 2ms y release suave para silenciar ruidos de fondo sin comerse los finales de frase.
-- **Ecualizador Paramétrico de 3 Bandas:** Graves (100 Hz Low Shelf), Medios (1 kHz Peak) y Agudos (8 kHz High Shelf) de -15 a +15 dB.
-- **Compresor Dinámico de Estudio:** Control de dinámica vocal con umbral, ratio (1:1 a 10:1), ganancia de compensación (makeup) y medidor de reducción de ganancia.
-- **Efectos de Carácter y Modulación:**
-  - **Robotizer / Vocoder:** Modulación por tren de pulsos armónicos con frecuencia portadora (20–500 Hz) y mezcla Dry/Wet.
-  - **Modulador en Anillo (Ring Modulator):** Portadora senoidal pura (50–2000 Hz) para voces de robots clásicos (Dalek), aliens y modulaciones metálicas.
-  - **Distorsión / Overdrive / Bitcrusher:** Saturación suave por tangente hiperbólica y drive para radios policiales, megáfonos e intercomunicadores.
-  - **Chorus / Doubler:** Línea de retardo modulada por LFO para engrosar la voz estéreo y dar sensación de coro.
-  - **Reverberación de Sala:** Red de filtros en peine y all-pass estéreo para ambientación espacial (cueva, catedral, sala pequeña).
-  - **Humanizer:** Micro-deriva orgánica de pitch para evitar el efecto de sintetizador rígido.
-- **Limitador de Seguridad:** Protección continua contra clipping y picos digitales imprevistos.
-
-### 🎧 Sidetone ("Escuchar mi voz") y Voice Tester Loop
-- **Sidetone de Retorno:** Stream `mvx.monitor` en tiempo real hacia tus auriculares con botón de activación instantánea y ganancia independiente (-24 a +12 dB).
-- **Voice Tester Loop:** Grabadora circular de prueba de 8 segundos. Permite grabar una frase corta y escucharla en bucle continuo mientras ajustas los efectos y sliders del Voice Lab sin tener que hablar todo el tiempo.
-
-### 🔊 Soundboard / Sampler Integrado
-- Reproducción instantánea de clips de sonido WAV directamente hacia el micrófono virtual y tus auriculares.
-- **Zero-Allocation & Zero-Lock:** Mezcla en tiempo real sin mutexes ni asignaciones dinámicas de memoria.
-- **Ducking Automático del Micrófono:** El micrófono físico se atenúa automáticamente un 70% (-10 dB) mientras se reproduce un clip de sonido para evitar saturaciones y mejorar la inteligibilidad.
-- **Sonidos de Fábrica Sintetizados:** `airhorn`, `bleep`, `chime`, `buzzer` generados automáticamente en `~/.local/share/mvx/sounds/`.
-- Permite arrastrar o copiar cualquier archivo WAV estándar a esa carpeta para usarlo de inmediato.
-
-### 🛡️ "Solo mi voz" (Biometría Vocal CAM++ + Silero VAD)
-- Verificación de hablante por redes neuronales ONNX fuera del hilo de tiempo real.
-- Bloquea voces ajenas de fondo en oficinas abiertas, cibercafés o casas familiares abriendo el micrófono solo cuando habla el usuario enrolado.
-
-### 🎛️ 14 Presets de Fábrica
-1. **Natural (Limpio):** Voz transparente con acondicionamiento de estudio (HPF 80Hz + Gate suave).
-2. **Locutor Grave (Broadcast):** Tono grave cálido (+compresor + EQ de graves).
-3. **Voz de Ardilla (Squirrel):** Pitch y formantes elevados en sincronía (+6 semitonos).
-4. **Titán / Demonio:** Pitch ultra-bajo (-5 st) con overdrive y reverberación cavernosa.
-5. **Cyborg / Androide:** Robotizador armónico a 90 Hz con ecualización metálica.
-6. **Radio Policial (Walkie-Talkie):** HPF a 300Hz, distorsión por recorte y saturación de medios.
-7. **Megáfono:** Resonancia en medios con drive y compresión agresiva.
-8. **Cueva Eco (Echo Cave):** Sala grande con reflexiones profundas.
-9. **Anónimo:** Pitch alterado y formantes ensanchados para ocultar la identidad.
-10. **Alien (Dalek):** Modulación en anillo a 280 Hz.
-11. **Teléfono Vintage:** Filtro paso banda telefónico estrecho con saturación.
-12. **Helio:** Formantes afinados hacia arriba sin alterar excesivamente el tono.
-13. **Demonio Radial (Radio Demon):** Overdrive con mezcla de chorus y reverberación oscura.
-14. **Robot Musical:** Modulación precisa afinada para gaming y streams.
+<!-- Capturas del proyecto: colocar en docs/assets/ -->
+<p align="center">
+  <img src="docs/assets/tui-main.png" alt="Interfaz TUI de MVX" width="49%" />
+</p>
 
 ---
 
-## Arquitectura de Tiempo Real (RT-Safe)
+## Qué ofrece
 
-Diseñado estrictamente para Linux y PipeWire:
-- **0 Bloqueos en Audio Thread:** Cero mutexes, cero llamadas al sistema, cero syscalls ni esperas dentro de los callbacks de PipeWire.
-- **Ring Buffer SPSC Mono:** Transporte eficiente de 1 muestra por frame con expansión multicanal automática a la salida.
-- **Gliding Atómico de Parámetros:** Mover sliders no destruye ni recrea nodos DSP. El pitch y los filtros se interpolan suavemente sin clics ni xruns.
-- **Flock de Instancia Única:** `mvxd` y `mvx-tray` están protegidos por candados de archivo `flock(2)` para evitar instancias duplicadas.
-- **Servicios de Usuario Systemd:** Corren bajo el usuario no privilegiado (`systemctl --user start mvxd`).
+- **Rack DSP en tiempo real (<15 ms):** Pitch y formantes independientes (Signalsmith Stretch), EQ de 3 bandas, compresor, puerta de ruido, robotizer, ring-mod, distorsión, chorus y reverb.
+- **Supresión de ruido neuronal:** DeepFilterNet3 ejecutado en CPU para limpiar teclado, ventiladores y ruido eléctrico sin recortar tu voz.
+- **Biometría vocal ("Solo mi voz"):** Verificación del hablante con CAM++ y Silero VAD para que el micrófono solo se abra cuando hablas tú.(falta mejorar su implementacion)
+- **Clonación de timbre [ALPHA]:** Extrae la huella vocal (256 dimensiones) desde un audio `.ogg/.wav/.mp3` y modula tu voz hacia ese timbre con OpenVoice V2.
+- **Control total desde teclado:** TUI compatible con ratón, CLI (`mvx ctl`) para atajos en Hyprland/Sway/KDE y salida JSON directa para Waybar.
 
 ---
 
-## Requisitos
+## Requisitos del entorno
 
-- **Linux** con PipeWire 1.2+ y WirePlumber.
-- **Rust** 1.80+ y herramientas de compilación (`gcc-libs`, `clang`).
-- Opcional: `waybar`, `hyprland`, `sway`, `kde`, `libayatana-appindicator`.
+Pensado para cualquier distribución **Linux x86_64** que cumpla con:
 
-En Arch Linux / CachyOS / Manjaro:
+- **Audio:** **PipeWire** + **WirePlumber** activos (no soporta PulseAudio ni JACK puros).
+- **Sistema:** `git`, `clang`, `cmake`, `pkg-config`, headers de `libpipewire-0.3` y `libspa-0.2`, `ffmpeg` y `curl`.
+- **Toolchain:** Rust `>= 1.96` (el instalador lo descarga con `rustup` si no lo tienes).
+- **Hardware:** CPU con **AVX2** recomendado y mínimo **2 GB de RAM**.
+
+---
+
+## Instalación
+
+Por ahora MVX no se distribuye en paquetes precompilados. Se instala clonando el repositorio con `git`; el script se encarga de revisar dependencias, compilar en modo `release`, instalar los binarios en `~/.local/bin`, **añadirlos automáticamente a tu `PATH`**(revisar scripts ante desconfianza) y descargar los modelos ONNX (~180 MB):
+
 ```bash
-sudo pacman -S --needed pipewire pipewire-audio wireplumber rust base-devel clang
-```
-
----
-
-## Instalación y Compilación
-
-### Compilar desde la fuente:
-```bash
-git clone https://github.com/x4yi/ModularVoiceX4yi.git
+git clone https://github.com/X4yii/ModularVoiceX4yi.git
 cd ModularVoiceX4yi
-cargo build --release
+./scripts/install.sh
 ```
 
-Los binarios generados se encuentran en:
-- `target/release/mvxd` — Daemon de audio PipeWire.
-- `target/release/mvx` — Interfaz TUI y CLI de control.
-- `target/release/mvx-tray` — Icono StatusNotifierItem en la barra del sistema.
+Opciones útiles del instalador:
 
-### Instalación en Arch Linux (PKGBUILD):
 ```bash
-cd packaging/arch
-makepkg -si
+./scripts/install.sh --fast             # Compila sin LTO (mucho más rápido en CPUs modestas o poca RAM)
+./scripts/install.sh --no-clone-models  # Omite los modelos de clonación neuronal (ahorra ~160 MB)
+./scripts/install.sh --no-deps          # Si ya instalaste las dependencias de tu distro por tu cuenta
+./scripts/uninstall.sh                  # Desinstala binarios y servicios (--purge borra también modelos y configs)
 ```
 
 ---
 
-## Uso
+## Uso rápido
 
-### Iniciar la aplicación:
 ```bash
-mvx
+mvx                                    # Abre la TUI (levanta el daemon mvxd automáticamente)
+mvx doctor                             # Verifica PipeWire, modelos, latencia y estado del sistema
+mvx ctl toggle-mute                    # Silencia/activa el micrófono (ideal para keybinds)
+mvx ctl toggle-bypass                  # Voz natural al instante sin apagar el motor
+mvx ctl next-preset                    # Cambia al siguiente perfil de voz
+mvx clone muestra.ogg --name "Custom"  # [ALPHA] Crea y activa un perfil clonado desde un audio
 ```
-Al ejecutar `mvx`:
-- Si el daemon `mvxd` no está corriendo, se inicia automáticamente en segundo plano.
-- Se abre la interfaz interactiva con 4 pestañas: **Estudio**, **Voice Lab**, **Soundboard** y **Dispositivos**.
-- Compatible con **ratón** (clic, arrastrar sliders, rueda de desplazamiento) y **teclado**.
 
-### Atajos de teclado en la TUI:
-- `1`..`4` o `Tab` — Cambiar de pestaña (`Estudio`, `Voice Lab`, `Soundboard`, `Dispositivos`).
-- `m` — Alternar Mute (silenciar micrófono).
-- `b` — Alternar Bypass DSP (micrófono limpio directo).
-- `s` — Alternar Sidetone / Retorno en auriculares.
-- `v` — Alternar "Solo mi voz" (CAM++ Speaker Lock).
-- `l` — Alternar grabación / bucle de prueba (Voice Tester Loop).
-- `Espacio` — Detener todos los sonidos de la soundboard.
-- `1`..`9` (en Soundboard) — Disparar sonido por número de clip.
-- `+` / `-` — Subir / bajar volumen maestro.
-- `[` / `]` — Modificar tono (pitch).
-- `q` o `Esc` — Salir de la TUI (el daemon sigue corriendo sin cortar la voz).
+Al abrir `mvx`, selecciona **`MVX Microphone` (`mvx_mic`)** como dispositivo de entrada en Discord, OBS o tu navegador.
 
 ---
 
-## Integración con Waybar y Atajos Globales (CLI)
+## Créditos y Licencia
 
-MVX incluye el subcomando `mvx ctl` para asignar atajos globales en tu gestor de ventanas (Hyprland, Sway, KDE, i3):
+Construido sobre [PipeWire](https://pipewire.org), [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet), [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch), [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (CAM++ / Silero VAD), [tract](https://github.com/sonos/tract) y [OpenVoice V2](https://github.com/myshell-ai/OpenVoice).
 
-```bash
-# Alternar mute del micrófono
-mvx ctl toggle-mute
-
-# Alternar bypass (para hablar natural al instante)
-mvx ctl toggle-bypass
-
-# Alternar monitoreo en auriculares (sidetone)
-mvx ctl toggle-monitor
-
-# Ajustar volumen de monitoreo en dB
-mvx ctl monitor-gain --gain-db 3.0
-
-# Siguiente o anterior preset
-mvx ctl next-preset
-mvx ctl prev-preset
-
-# Aplicar preset por ID
-mvx ctl preset --id voz_ardilla
-
-# Disparar un sonido de la soundboard
-mvx ctl sound --id airhorn
-
-# Detener todos los sonidos
-mvx ctl stop-sounds
-
-# Controlar la grabadora de bucle
-mvx ctl loop-test
-```
-
-### Módulo Waybar (`~/.config/waybar/config.jsonc`):
-```jsonc
-"custom/mvx": {
-    "format": "{}",
-    "return-type": "json",
-    "exec": "mvx status --waybar",
-    "interval": 2,
-    "on-click": "mvx ctl toggle-mute",
-    "on-click-right": "mvx ctl toggle-bypass",
-    "on-click-middle": "mvx ctl next-preset"
-}
-```
-
----
-
-## Diagnóstico y Salud
-
-Para verificar el estado de PipeWire, el quantum, la latencia total y la ruta de audio:
-```bash
-mvx doctor
-```
-
-Para consultar los modelos biométricos de voz:
-```bash
-mvx models install   # Descarga CAM++ y Silero VAD (~30 MB)
-mvx models status    # Muestra estado de archivos y perfiles
-```
-
----
-
-## Licencia
-
-Distribuido bajo la licencia [MIT](LICENSE).
-Diseñado exclusivamente para el ecosistema moderno de audio en GNU/Linux.
+Distribuido bajo licencia [MIT](LICENSE).

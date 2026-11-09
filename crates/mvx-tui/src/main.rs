@@ -53,7 +53,7 @@ enum CliCommand {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Clonar una voz desde un archivo de audio (WAV, MP3, OGG, FLAC).
+    /// [ALPHA] Clonar una voz desde un archivo de audio (WAV, MP3, OGG, FLAC).
     Clone {
         /// Ruta al archivo de audio de muestra.
         path: PathBuf,
@@ -99,7 +99,7 @@ enum CtlAction {
 
 #[derive(Debug, Subcommand)]
 enum ModelsAction {
-    /// Descargar modelo CAM++ y Silero VAD.
+    /// Descargar modelos (CAM++, Silero VAD y OpenVoice V2 [ALPHA]).
     Install,
     /// Imprimir rutas y estado de verificacion de modelos.
     Status,
@@ -118,7 +118,11 @@ fn main() -> Result<()> {
                 } else if state.bypass {
                     ("[BYPASS]".to_string(), "bypass", "warning")
                 } else {
-                    (format!("[MVX] {}", state.active_preset_name), "active", "active")
+                    (
+                        format!("[MVX] {}", state.active_preset_name),
+                        "active",
+                        "active",
+                    )
                 };
                 let tooltip = format!(
                     "ModularVoiceX4yi\nPreset: {}\nLatencia: {:.1} ms\nSidetone: {}\nBypass: {}",
@@ -257,22 +261,54 @@ fn main() -> Result<()> {
         }
         CliCommand::Doctor => doctor(),
         CliCommand::Models { action } => models_command(action),
-        CliCommand::Clone { path, name, activate } => {
-            let mut session = VoiceCloneSession::default();
+        CliCommand::Clone {
+            path,
+            name,
+            activate,
+        } => {
+            eprintln!("AVISO: la clonacion de voz esta en etapa ALPHA (muy temprana); la calidad y la estabilidad no estan garantizadas.");
+            if !mvx_core::openvoice_models_ready() {
+                anyhow::bail!(
+                    "faltan los modelos de clonacion (OpenVoice V2). Ejecuta `mvx models install`"
+                );
+            }
+            if !path.is_file() {
+                anyhow::bail!("no existe el archivo de muestra: {}", path.display());
+            }
+            let mut client = connect_or_start()?;
+            let path_str = path.to_string_lossy().to_string();
+            client.clone_voice_validate(path_str)?;
+            // La validacion es asincrona en el motor: esperar a que termine.
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let state = loop {
+                std::thread::sleep(Duration::from_millis(400));
+                let state = client.state()?;
+                match state.clone_session.status {
+                    CloneStatus::Ready => break state,
+                    CloneStatus::Error => {
+                        anyhow::bail!("clonacion fallida: {}", state.clone_session.status_message)
+                    }
+                    _ if Instant::now() > deadline => {
+                        anyhow::bail!("tiempo de espera agotado analizando la muestra")
+                    }
+                    _ => {}
+                }
+            };
+            let mut session = state.clone_session;
             session.name = name.clone();
-            session.validate_source(&path)?;
+            let preset = session.to_preset();
+            let preset_id = preset.id.clone();
+            client.upsert_preset(preset, activate)?;
+            client.clone_voice_save(session.clone())?;
             println!("Muestra cargada: {}", session.source_path.display());
             println!("Duracion: {:.2} s", session.duration_secs);
             println!("Pitch estimado: {:+.1} st", session.pitch_offset);
             println!("Formantes estimados: {:+.1} st", session.formant_offset);
-            println!("Ecualizacion sugerida: Graves {:+.1}dB | Medios {:+.1}dB | Agudos {:+.1}dB", session.eq_low, session.eq_mid, session.eq_high);
-
-            let mut client = connect_or_start()?;
-            let preset = session.to_preset();
-            let preset_id = preset.id.clone();
-            client.upsert_preset(preset, activate)?;
-            let _ = client.clone_voice_save(session);
-            println!("Perfil clonado guardado como preset: «{}» (ID: {})", name, preset_id);
+            println!("Modelo neuronal: {}", session.model_target);
+            println!(
+                "Perfil clonado guardado como preset: «{}» (ID: {})",
+                name, preset_id
+            );
             if activate {
                 println!("Preset activado en vivo en mvxd.");
             }
@@ -287,7 +323,6 @@ fn main() -> Result<()> {
         }
     }
 }
-
 
 fn connect_or_start() -> Result<Client> {
     let path = socket_path();
@@ -320,8 +355,7 @@ fn connect_or_start() -> Result<Client> {
 }
 
 fn start_daemon() -> Result<()> {
-    let program = find_binary("mvxd")
-        .context("no se encontro mvxd en PATH")?;
+    let program = find_binary("mvxd").context("no se encontro mvxd en PATH")?;
     spawn_detached(&program, "mvxd.log").context("no se pudo iniciar mvxd")
 }
 
@@ -339,8 +373,8 @@ fn spawn_detached(program: &Path, log_name: &str) -> Result<()> {
         .open(&log_path)
         .ok();
 
-    let mut command = if Path::new("/usr/bin/setsid").exists() {
-        let mut command = Command::new("/usr/bin/setsid");
+    let mut command = if let Some(setsid) = find_binary("setsid") {
+        let mut command = Command::new(setsid);
         command.arg(program);
         command
     } else {
@@ -545,7 +579,9 @@ impl Modal {
             Self::NewPreset { .. } => "Nombre del nuevo perfil:",
             Self::EnrollVoice { .. } => "Nombre del perfil (habla 10s al confirmar):",
             Self::ConfirmReset { target } => match target {
-                ConfigResetTarget::All => "Restablecer configuracion completa a valores de fabrica?",
+                ConfigResetTarget::All => {
+                    "Restablecer configuracion completa a valores de fabrica?"
+                }
                 ConfigResetTarget::Audio => "Restablecer audio y PipeWire a valores por defecto?",
                 ConfigResetTarget::Presets => "Restablecer todos los presets a valores de fabrica?",
                 ConfigResetTarget::Dsp => "Restablecer cadena DSP y filtros por defecto?",
@@ -886,11 +922,9 @@ impl App {
             },
             KeyCode::Down | KeyCode::Char('j') => match self.tab {
                 Tab::Perfiles | Tab::Filtros => self.move_preset(1),
-                Tab::Dispositivos => {
-                    if !self.state.devices.is_empty() {
-                        self.selected_device =
-                            (self.selected_device + 1).min(self.state.devices.len() - 1);
-                    }
+                Tab::Dispositivos if !self.state.devices.is_empty() => {
+                    self.selected_device =
+                        (self.selected_device + 1).min(self.state.devices.len() - 1);
                 }
                 _ => {}
             },
@@ -1380,7 +1414,10 @@ impl App {
                         preset.add_filter("equalizer");
                     }
                     preset.filters.iter_mut().for_each(|f| {
-                        if let FilterConfig::Equalizer { low_db, enabled, .. } = f {
+                        if let FilterConfig::Equalizer {
+                            low_db, enabled, ..
+                        } = f
+                        {
                             *enabled = true;
                             *low_db = value.round();
                         }
@@ -1394,7 +1431,10 @@ impl App {
                         preset.add_filter("equalizer");
                     }
                     preset.filters.iter_mut().for_each(|f| {
-                        if let FilterConfig::Equalizer { mid_db, enabled, .. } = f {
+                        if let FilterConfig::Equalizer {
+                            mid_db, enabled, ..
+                        } = f
+                        {
                             *enabled = true;
                             *mid_db = value.round();
                         }
@@ -1785,7 +1825,12 @@ impl App {
             enabled,
             gain_db: self.state.monitor_gain_db,
         });
-        self.status = if enabled { "MONITOR: ON" } else { "MONITOR: OFF" }.into();
+        self.status = if enabled {
+            "MONITOR: ON"
+        } else {
+            "MONITOR: OFF"
+        }
+        .into();
     }
 
     fn toggle_loop_test(&mut self) {
@@ -1997,7 +2042,9 @@ impl App {
                 Span::raw("Latencia: "),
                 Span::styled(
                     format!("{:.1}ms", self.state.total_latency_ms),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" (DSP: "),
                 Span::styled(
@@ -2015,7 +2062,9 @@ impl App {
                 Span::raw("Activo: "),
                 Span::styled(
                     &self.state.active_preset_name,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]))
             .alignment(Alignment::Right),
@@ -2043,10 +2092,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            (
-                "[MONITOR: OFF (s)]",
-                Style::default().fg(Color::Gray),
-            )
+            ("[MONITOR: OFF (s)]", Style::default().fg(Color::Gray))
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(mon_text, mon_style)))
@@ -2069,13 +2115,13 @@ impl App {
         let (mute_text, mute_style) = if self.state.muted {
             (
                 "[MUTE: ON (m)]",
-                Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
-            (
-                "[MUTE (m)]",
-                Style::default().fg(Color::White),
-            )
+            ("[MUTE (m)]", Style::default().fg(Color::White))
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(mute_text, mute_style)))
@@ -2087,13 +2133,13 @@ impl App {
         let (bypass_text, bypass_style) = if self.state.bypass {
             (
                 "[BYPASS: ON (b)]",
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
-            (
-                "[BYPASS (b)]",
-                Style::default().fg(Color::White),
-            )
+            ("[BYPASS (b)]", Style::default().fg(Color::White))
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(bypass_text, bypass_style)))
@@ -2129,7 +2175,7 @@ impl App {
         self.draw_tab_button(frame, tabs[0], "1 PERFILES", Tab::Perfiles);
         self.draw_tab_button(frame, tabs[1], "2 FILTROS", Tab::Filtros);
         self.draw_tab_button(frame, tabs[2], "3 DISPOSITIVOS", Tab::Dispositivos);
-        self.draw_tab_button(frame, tabs[3], "4 CLONACION IA", Tab::Clonacion);
+        self.draw_tab_button(frame, tabs[3], "4 CLONACION [ALPHA]", Tab::Clonacion);
         self.draw_tab_button(frame, tabs[4], "5 AJUSTES", Tab::Ajustes);
     }
 
@@ -2162,9 +2208,7 @@ impl App {
             .split(area);
 
         // Columna izquierda: Lista de perfiles
-        let block_left = Block::default()
-            .borders(Borders::ALL)
-            .title(" Perfiles ");
+        let block_left = Block::default().borders(Borders::ALL).title(" Perfiles ");
         let inner_left = block_left.inner(cols[0]);
         frame.render_widget(block_left, cols[0]);
 
@@ -2228,25 +2272,10 @@ impl App {
                 ])
                 .split(left_layout[1]);
 
-            let is_builtin = self
-                .selected()
-                .map(|p| p.builtin)
-                .unwrap_or(false);
+            let is_builtin = self.selected().map(|p| p.builtin).unwrap_or(false);
 
-            self.draw_button(
-                frame,
-                action_cols[0],
-                "[+] Nuevo",
-                Action::NewPreset,
-                true,
-            );
-            self.draw_button(
-                frame,
-                action_cols[1],
-                "Activar",
-                Action::ApplyPreset,
-                true,
-            );
+            self.draw_button(frame, action_cols[0], "[+] Nuevo", Action::NewPreset, true);
+            self.draw_button(frame, action_cols[1], "Activar", Action::ApplyPreset, true);
             self.draw_button(
                 frame,
                 action_cols[2],
@@ -2264,9 +2293,7 @@ impl App {
         }
 
         // Columna derecha: Detalle del perfil
-        let block_right = Block::default()
-            .borders(Borders::ALL)
-            .title(" Parametros ");
+        let block_right = Block::default().borders(Borders::ALL).title(" Parametros ");
         let inner_right = block_right.inner(cols[1]);
         frame.render_widget(block_right, cols[1]);
 
@@ -2296,7 +2323,9 @@ impl App {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     &preset.name,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
                 Span::styled(active_tag, Style::default().fg(Color::Yellow)),
@@ -2369,7 +2398,10 @@ impl App {
 
         // Filtros en cadena
         let mut active_badges = Vec::new();
-        active_badges.push(Span::styled("Filtros: ", Style::default().fg(Color::DarkGray)));
+        active_badges.push(Span::styled(
+            "Filtros: ",
+            Style::default().fg(Color::DarkGray),
+        ));
         for filter in &preset.filters {
             let (tag, color) = if filter.enabled() {
                 (format!("[{}] ", filter.kind()), Color::Green)
@@ -2378,10 +2410,7 @@ impl App {
             };
             active_badges.push(Span::styled(tag, Style::default().fg(color)));
         }
-        frame.render_widget(
-            Paragraph::new(Line::from(active_badges)),
-            right_rows[5],
-        );
+        frame.render_widget(Paragraph::new(Line::from(active_badges)), right_rows[5]);
     }
 
     // ==========================================
@@ -2435,7 +2464,11 @@ impl App {
         self.draw_toggle(
             frame,
             a_rows[0],
-            if hpf.is_some() { "[x] HPF (Paso Alto)" } else { "[ ] HPF (Paso Alto)" },
+            if hpf.is_some() {
+                "[x] HPF (Paso Alto)"
+            } else {
+                "[ ] HPF (Paso Alto)"
+            },
             Action::ToggleFilter("high_pass"),
             hpf.is_some(),
         );
@@ -2455,7 +2488,11 @@ impl App {
         self.draw_toggle(
             frame,
             a_rows[2],
-            if gate.is_some() { "[x] Noise Gate" } else { "[ ] Noise Gate" },
+            if gate.is_some() {
+                "[x] Noise Gate"
+            } else {
+                "[ ] Noise Gate"
+            },
             Action::ToggleFilter("noise_gate"),
             gate.is_some(),
         );
@@ -2470,17 +2507,24 @@ impl App {
             SliderKind::GateThreshold,
         );
         frame.render_widget(
-            Paragraph::new(format!("  Atenuacion Gate: -{:.1} dB", self.state.gate_reduction_db))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(
+                "  Atenuacion Gate: -{:.1} dB",
+                self.state.gate_reduction_db
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
             a_rows[4],
         );
 
-        // DeepFilterNet3 (Krisp-grade)
+        // DeepFilterNet3
         let nr = preset.noise_reduction();
         self.draw_toggle(
             frame,
             a_rows[5],
-            if nr.is_some() { "[x] DeepFilterNet3" } else { "[ ] DeepFilterNet3" },
+            if nr.is_some() {
+                "[x] DeepFilterNet3"
+            } else {
+                "[ ] DeepFilterNet3"
+            },
             Action::ToggleNoise,
             nr.is_some(),
         );
@@ -2500,7 +2544,11 @@ impl App {
         self.draw_toggle(
             frame,
             a_rows[7],
-            if speaker.is_some() { "[x] Solo mi voz (CAM++)" } else { "[ ] Solo mi voz (CAM++)" },
+            if speaker.is_some() {
+                "[x] Solo mi voz (CAM++)"
+            } else {
+                "[ ] Solo mi voz (CAM++)"
+            },
             Action::ToggleSpeaker,
             speaker.is_some(),
         );
@@ -2524,7 +2572,13 @@ impl App {
             .split(a_rows[9]);
         let active_prof = speaker
             .as_ref()
-            .map(|l| if l.profile.is_empty() { "(sin perfil)" } else { &l.profile })
+            .map(|l| {
+                if l.profile.is_empty() {
+                    "(sin perfil)"
+                } else {
+                    &l.profile
+                }
+            })
             .unwrap_or("(desactivado)");
         self.draw_button(
             frame,
@@ -2547,21 +2601,56 @@ impl App {
         self.draw_toggle(
             frame,
             a_rows[10],
-            if eq.is_some() { "[x] EQ 3-Bandas" } else { "[ ] EQ 3-Bandas" },
+            if eq.is_some() {
+                "[x] EQ 3-Bandas"
+            } else {
+                "[ ] EQ 3-Bandas"
+            },
             Action::ToggleFilter("equalizer"),
             eq.is_some(),
         );
         let (low, mid, high) = eq.unwrap_or((0.0, 0.0, 0.0));
-        self.draw_slider(frame, a_rows[11], "Graves (100Hz)", low, -15.0, 15.0, "dB", SliderKind::EqLow);
-        self.draw_slider(frame, a_rows[12], "Medios (1kHz)", mid, -15.0, 15.0, "dB", SliderKind::EqMid);
-        self.draw_slider(frame, a_rows[13], "Agudos (8kHz)", high, -15.0, 15.0, "dB", SliderKind::EqHigh);
+        self.draw_slider(
+            frame,
+            a_rows[11],
+            "Graves (100Hz)",
+            low,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqLow,
+        );
+        self.draw_slider(
+            frame,
+            a_rows[12],
+            "Medios (1kHz)",
+            mid,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqMid,
+        );
+        self.draw_slider(
+            frame,
+            a_rows[13],
+            "Agudos (8kHz)",
+            high,
+            -15.0,
+            15.0,
+            "dB",
+            SliderKind::EqHigh,
+        );
 
         // Compresor
         let comp = preset.compressor();
         self.draw_toggle(
             frame,
             a_rows[14],
-            if comp.is_some() { "[x] Compresor" } else { "[ ] Compresor" },
+            if comp.is_some() {
+                "[x] Compresor"
+            } else {
+                "[ ] Compresor"
+            },
             Action::ToggleFilter("compressor"),
             comp.is_some(),
         );
@@ -2596,8 +2685,11 @@ impl App {
             SliderKind::CompMakeup,
         );
         frame.render_widget(
-            Paragraph::new(format!("  Reduccion Comp: -{:.1} dB", self.state.comp_reduction_db))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(
+                "  Reduccion Comp: -{:.1} dB",
+                self.state.comp_reduction_db
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
             a_rows[18],
         );
 
@@ -2630,41 +2722,107 @@ impl App {
             ])
             .split(inner_b);
 
-        self.draw_slider(frame, b_rows[0], "Pitch (Tono)", preset.pitch_semitones, -12.0, 12.0, "st", SliderKind::Pitch);
-        self.draw_slider(frame, b_rows[1], "Formantes (Timbre)", preset.formant_semitones, -12.0, 12.0, "st", SliderKind::Formant);
+        self.draw_slider(
+            frame,
+            b_rows[0],
+            "Pitch (Tono)",
+            preset.pitch_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Pitch,
+        );
+        self.draw_slider(
+            frame,
+            b_rows[1],
+            "Formantes (Timbre)",
+            preset.formant_semitones,
+            -12.0,
+            12.0,
+            "st",
+            SliderKind::Formant,
+        );
 
         // Robot
         let robot = preset.robotizer();
         self.draw_toggle(
             frame,
             b_rows[2],
-            if robot.is_some() { "[x] Robotizer" } else { "[ ] Robotizer" },
+            if robot.is_some() {
+                "[x] Robotizer"
+            } else {
+                "[ ] Robotizer"
+            },
             Action::ToggleFilter("robotizer"),
             robot.is_some(),
         );
         let (rfreq, rmix) = robot.unwrap_or((80.0, 0.5));
-        self.draw_slider(frame, b_rows[3], "Freq Robot", rfreq, 20.0, 500.0, "Hz", SliderKind::RobotFreq);
-        self.draw_slider(frame, b_rows[4], "Mix Robot", rmix, 0.0, 1.0, "", SliderKind::RobotMix);
+        self.draw_slider(
+            frame,
+            b_rows[3],
+            "Freq Robot",
+            rfreq,
+            20.0,
+            500.0,
+            "Hz",
+            SliderKind::RobotFreq,
+        );
+        self.draw_slider(
+            frame,
+            b_rows[4],
+            "Mix Robot",
+            rmix,
+            0.0,
+            1.0,
+            "",
+            SliderKind::RobotMix,
+        );
 
         // Ring
         let ring = preset.ring_mod();
         self.draw_toggle(
             frame,
             b_rows[5],
-            if ring.is_some() { "[x] Ring Modulator" } else { "[ ] Ring Modulator" },
+            if ring.is_some() {
+                "[x] Ring Modulator"
+            } else {
+                "[ ] Ring Modulator"
+            },
             Action::ToggleFilter("ring_mod"),
             ring.is_some(),
         );
         let (ring_f, ring_m) = ring.unwrap_or((240.0, 0.5));
-        self.draw_slider(frame, b_rows[6], "Carrier Freq", ring_f, 50.0, 2000.0, "Hz", SliderKind::RingFreq);
-        self.draw_slider(frame, b_rows[7], "Mix Ring", ring_m, 0.0, 1.0, "", SliderKind::RingMix);
+        self.draw_slider(
+            frame,
+            b_rows[6],
+            "Carrier Freq",
+            ring_f,
+            50.0,
+            2000.0,
+            "Hz",
+            SliderKind::RingFreq,
+        );
+        self.draw_slider(
+            frame,
+            b_rows[7],
+            "Mix Ring",
+            ring_m,
+            0.0,
+            1.0,
+            "",
+            SliderKind::RingMix,
+        );
 
         // Dist
         let dist = preset.distortion();
         self.draw_toggle(
             frame,
             b_rows[8],
-            if dist.is_some() { "[x] Distortion" } else { "[ ] Distortion" },
+            if dist.is_some() {
+                "[x] Distortion"
+            } else {
+                "[ ] Distortion"
+            },
             Action::ToggleFilter("distortion"),
             dist.is_some(),
         );
@@ -2694,7 +2852,11 @@ impl App {
         self.draw_toggle(
             frame,
             b_rows[11],
-            if chorus.is_some() { "[x] Chorus" } else { "[ ] Chorus" },
+            if chorus.is_some() {
+                "[x] Chorus"
+            } else {
+                "[ ] Chorus"
+            },
             Action::ToggleFilter("chorus"),
             chorus.is_some(),
         );
@@ -2714,7 +2876,11 @@ impl App {
         self.draw_toggle(
             frame,
             b_rows[13],
-            if reverb.is_some() { "[x] Reverb" } else { "[ ] Reverb" },
+            if reverb.is_some() {
+                "[x] Reverb"
+            } else {
+                "[ ] Reverb"
+            },
             Action::ToggleFilter("reverb"),
             reverb.is_some(),
         );
@@ -2776,7 +2942,12 @@ impl App {
                 .take(capacity)
                 .enumerate()
             {
-                let rect = Rect::new(left_layout[0].x, left_layout[0].y + row as u16, left_layout[0].width, 1);
+                let rect = Rect::new(
+                    left_layout[0].x,
+                    left_layout[0].y + row as u16,
+                    left_layout[0].width,
+                    1,
+                );
                 let selected = self.state.selected_input.as_deref() == Some(device.name.as_str());
                 let highlighted = index == self.selected_device;
 
@@ -2807,13 +2978,7 @@ impl App {
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(left_layout[1]);
 
-            self.draw_button(
-                frame,
-                btn_cols[0],
-                "Actualizar lista",
-                Action::Rescan,
-                true,
-            );
+            self.draw_button(frame, btn_cols[0], "Actualizar lista", Action::Rescan, true);
             self.draw_button(
                 frame,
                 btn_cols[1],
@@ -2947,11 +3112,17 @@ impl App {
                 ]),
                 Line::from(vec![
                     Span::styled("Salida virtual:   ", Style::default().fg(Color::Green)),
-                    Span::raw(format!("{} (Audio/Source/Virtual para Discord/OBS/Meet)", self.state.virtual_source)),
+                    Span::raw(format!(
+                        "{} (Audio/Source/Virtual para Discord/OBS/Meet)",
+                        self.state.virtual_source
+                    )),
                 ]),
                 Line::from(format!(
                     "PipeWire: {} Hz | {} ch | Quantum: {} frames | Xruns: {}",
-                    self.state.sample_rate, self.state.channels, self.state.quantum, self.state.xruns
+                    self.state.sample_rate,
+                    self.state.channels,
+                    self.state.quantum,
+                    self.state.xruns
                 )),
             ])
             .style(Style::default().fg(Color::Gray)),
@@ -2966,7 +3137,7 @@ impl App {
     fn draw_clonacion(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Clonacion de Voz (Redes Neuronales) ");
+            .title(" Clonacion de Voz [ALPHA - etapa muy temprana] ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -3041,7 +3212,9 @@ impl App {
                 Span::styled("Estado IA: ", Style::default().fg(Color::Cyan)),
                 Span::styled(
                     status_badge,
-                    Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("  ({})", self.clone_session.status_message)),
             ])),
@@ -3281,8 +3454,7 @@ impl App {
             .split(inner);
 
         frame.render_widget(
-            Paragraph::new(modal.hint())
-                .style(Style::default().fg(Color::White)),
+            Paragraph::new(modal.hint()).style(Style::default().fg(Color::White)),
             lines[0],
         );
 
@@ -3303,8 +3475,20 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(lines[2]);
 
-        self.draw_button(frame, buttons[0], "Cancelar (Esc)", Action::ModalCancel, true);
-        self.draw_button(frame, buttons[1], "Confirmar (Enter)", Action::ModalSubmit, true);
+        self.draw_button(
+            frame,
+            buttons[0],
+            "Cancelar (Esc)",
+            Action::ModalCancel,
+            true,
+        );
+        self.draw_button(
+            frame,
+            buttons[1],
+            "Confirmar (Enter)",
+            Action::ModalSubmit,
+            true,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3438,10 +3622,7 @@ fn models_command(action: ModelsAction) -> Result<()> {
             let mut client = connect_or_start()?;
             match client.request(&Request::InstallModels)? {
                 Response::Error { message } => println!("Error: {message}"),
-                _ => println!(
-                    "Descarga iniciada en {}",
-                    mvx_core::models_dir().display()
-                ),
+                _ => println!("Descarga iniciada en {}", mvx_core::models_dir().display()),
             }
             Ok(())
         }
@@ -3458,10 +3639,100 @@ fn models_command(action: ModelsAction) -> Result<()> {
                 if vad.exists() { "OK" } else { "!!" },
                 vad.display()
             );
+            let ov = mvx_core::openvoice_dir();
+            println!(
+                "[{}] OpenVoice V2 (clonacion, ALPHA): {}",
+                if mvx_core::openvoice_models_ready() {
+                    "OK"
+                } else {
+                    "!!"
+                },
+                ov.display()
+            );
             println!("Perfiles: {}", mvx_core::list_voice_profiles().join(", "));
             Ok(())
         }
     }
+}
+
+fn have_command(name: &str) -> bool {
+    find_binary(name).is_some()
+}
+
+fn doctor_environment() {
+    let mark = |ok: bool| if ok { "OK" } else { "!!" };
+    println!(
+        "  [{}] XDG_RUNTIME_DIR: {}",
+        mark(std::env::var_os("XDG_RUNTIME_DIR").is_some()),
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "no definido (se usa /tmp)".into())
+    );
+    let pw = have_command("pw-cli")
+        && Command::new("pw-cli")
+            .arg("info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    println!(
+        "  [{}] PipeWire: {}",
+        mark(pw),
+        if pw {
+            "activo"
+        } else {
+            "no responde (requerido: PipeWire + WirePlumber)"
+        }
+    );
+    println!(
+        "  [{}] ffmpeg: {}",
+        mark(have_command("ffmpeg")),
+        if have_command("ffmpeg") {
+            "disponible"
+        } else {
+            "falta (necesario para clonar desde MP3/OGG/FLAC)"
+        }
+    );
+    println!(
+        "  [{}] curl/wget: {}",
+        mark(have_command("curl") || have_command("wget")),
+        if have_command("curl") || have_command("wget") {
+            "disponible"
+        } else {
+            "falta (necesario para `models install`)"
+        }
+    );
+    println!(
+        "  [{}] modelos base (CAM++/Silero): {}",
+        mark(mvx_core::speaker_model_path().is_file() && mvx_core::vad_model_path().is_file()),
+        if mvx_core::speaker_model_path().is_file() && mvx_core::vad_model_path().is_file() {
+            "instalados"
+        } else {
+            "faltan (`mvx models install`)"
+        }
+    );
+    println!(
+        "  [{}] clonacion de voz (ALPHA): {}",
+        if mvx_core::openvoice_models_ready() {
+            "OK"
+        } else {
+            "--"
+        },
+        if mvx_core::openvoice_models_ready() {
+            "modelos OpenVoice V2 instalados"
+        } else {
+            "opcional; modelos no instalados"
+        }
+    );
+    #[cfg(target_arch = "x86_64")]
+    println!(
+        "  [{}] CPU AVX2: {}",
+        mark(std::is_x86_feature_detected!("avx2")),
+        if std::is_x86_feature_detected!("avx2") {
+            "si"
+        } else {
+            "no (el rendimiento neuronal sera bajo)"
+        }
+    );
 }
 
 fn doctor() -> Result<()> {
@@ -3471,6 +3742,7 @@ fn doctor() -> Result<()> {
     println!("  config: {}", mvx_core::config_path().display());
     println!("  presets: {}", mvx_core::presets_path().display());
     println!("  modelos: {}", mvx_core::models_dir().display());
+    doctor_environment();
     match Client::connect(&path) {
         Ok(mut client) => {
             println!("  [OK] daemon conectado");
@@ -3483,7 +3755,11 @@ fn doctor() -> Result<()> {
             println!("  [OK] fuente virtual: {}", state.virtual_source);
             println!(
                 "  [{}] entrada: {}",
-                if state.selected_input.is_some() { "OK" } else { "!!" },
+                if state.selected_input.is_some() {
+                    "OK"
+                } else {
+                    "!!"
+                },
                 state
                     .selected_input_description
                     .clone()
@@ -3502,10 +3778,12 @@ fn doctor() -> Result<()> {
                 "  [OK] preset: {} ({})",
                 state.active_preset_name, state.active_preset
             );
+            let models_ok =
+                mvx_core::speaker_model_path().is_file() && mvx_core::vad_model_path().is_file();
             println!(
                 "  [{}] modelos de voz: {}",
-                if state.models_installed { "OK" } else { "!!" },
-                if state.models_installed {
+                if models_ok { "OK" } else { "!!" },
+                if models_ok {
                     "instalados"
                 } else {
                     "faltan (ejecuta `mvx models install`)"
@@ -3513,7 +3791,11 @@ fn doctor() -> Result<()> {
             );
             println!(
                 "  [{}] perfiles de voz: {}",
-                if state.voice_profiles.is_empty() { "--" } else { "OK" },
+                if state.voice_profiles.is_empty() {
+                    "--"
+                } else {
+                    "OK"
+                },
                 if state.voice_profiles.is_empty() {
                     "sin perfiles (opcional)".to_string()
                 } else {

@@ -298,9 +298,13 @@ fn run_worker(
                                     profile = Some(new_profile);
                                     shared.set_speaker_enabled(true, true);
                                     shared.set_voice_profiles(mvx_core::list_voice_profiles());
-                                    shared.set_speaker_status(format!("perfil «{}» guardado con éxito", enroll.name));
+                                    shared.set_speaker_status(format!(
+                                        "perfil «{}» guardado con éxito",
+                                        enroll.name
+                                    ));
                                     let hold_ms = shared.speaker_config().1;
-                                    hold_until = Instant::now() + Duration::from_millis(hold_ms as u64);
+                                    hold_until =
+                                        Instant::now() + Duration::from_millis(hold_ms as u64);
                                 }
                             }
                             Err(err) => {

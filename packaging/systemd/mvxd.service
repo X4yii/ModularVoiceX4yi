@@ -1,6 +1,6 @@
 [Unit]
 Description=MVX voice modulator daemon
-Documentation=https://github.com/x4yi/ModularVoiceX4yi
+Documentation=https://github.com/X4yii/ModularVoiceX4yi
 After=pipewire.service wireplumber.service
 Wants=pipewire.service
 PartOf=pipewire.service

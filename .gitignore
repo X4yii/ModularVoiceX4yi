@@ -5,3 +5,8 @@
 .DS_Store
 .idea/
 .vscode/
+*.part
+*.onnx
+*.ogg
+*.bak
+.env

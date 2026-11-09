@@ -32,7 +32,7 @@ El daemon es dueño de todos los objetos PipeWire y del estado de presets. La TU
    - envía la señal cruda al ring del worker de hablante (si `Solo mi voz` está activo);
    - aplica la cadena DSP:
      - compuerta de hablante (con lookahead configurable);
-     - DeepFilterNet3 opcional (Krisp-grade);
+     - DeepFilterNet3 opcional;
      - pitch/formantes con Signalsmith Stretch;
      - ganancia del preset;
      - ganancia maestra + mute;

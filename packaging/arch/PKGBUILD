@@ -1,13 +1,13 @@
 # Maintainer: x4yi
 pkgname=modularvoicex4yi
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Modulador de voz profesional en tiempo real nativo de PipeWire para Linux"
 arch=('x86_64')
-url="https://github.com/x4yi/ModularVoiceX4yi"
+url="https://github.com/X4yii/ModularVoiceX4yi"
 license=('MIT')
-depends=('pipewire' 'gcc-libs' 'glibc')
-makedepends=('cargo' 'git' 'clang' 'pkg-config')
+depends=('pipewire' 'wireplumber' 'gcc-libs' 'glibc' 'ffmpeg' 'curl')
+makedepends=('cargo' 'git' 'clang' 'cmake' 'pkgconf')
 optdepends=(
     'onnxruntime: Aceleración de verificación de voz CAM++'
     'libayatana-appindicator: Icono en la bandeja del sistema'

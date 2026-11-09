@@ -31,6 +31,16 @@ pub enum FilterConfig {
         #[serde(default = "default_strength")]
         strength: f32,
     },
+    NeuralVoice {
+        #[serde(default = "default_true")]
+        enabled: bool,
+        #[serde(default)]
+        target_name: String,
+        #[serde(default)]
+        embedding: Vec<f32>,
+        #[serde(default)]
+        tau: f32,
+    },
     Gain {
         #[serde(default = "default_true")]
         enabled: bool,
@@ -149,6 +159,7 @@ impl FilterConfig {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::NoiseReduction { .. } => "noise_reduction",
+            Self::NeuralVoice { .. } => "neural_voice",
             Self::Gain { .. } => "gain",
             Self::SpeakerLock { .. } => "speaker_lock",
             Self::NoiseGate { .. } => "noise_gate",
@@ -167,6 +178,7 @@ impl FilterConfig {
     pub fn enabled(&self) -> bool {
         match self {
             Self::NoiseReduction { enabled, .. } => *enabled,
+            Self::NeuralVoice { enabled, .. } => *enabled,
             Self::Gain { enabled, .. } => *enabled,
             Self::SpeakerLock { enabled, .. } => *enabled,
             Self::NoiseGate { enabled, .. } => *enabled,
@@ -185,6 +197,7 @@ impl FilterConfig {
     pub fn set_enabled(&mut self, value: bool) {
         match self {
             Self::NoiseReduction { enabled, .. } => *enabled = value,
+            Self::NeuralVoice { enabled, .. } => *enabled = value,
             Self::Gain { enabled, .. } => *enabled = value,
             Self::SpeakerLock { enabled, .. } => *enabled = value,
             Self::NoiseGate { enabled, .. } => *enabled = value,
@@ -203,6 +216,7 @@ impl FilterConfig {
     pub fn normalize(&mut self) {
         match self {
             Self::NoiseReduction { strength, .. } => *strength = strength.clamp(0.0, 1.0),
+            Self::NeuralVoice { tau, .. } => *tau = tau.clamp(0.0, 1.0),
             Self::Gain { gain_db, .. } => *gain_db = gain_db.clamp(-60.0, 24.0),
             Self::SpeakerLock {
                 threshold,
@@ -262,17 +276,13 @@ impl FilterConfig {
                 *mix = mix.clamp(0.0, 1.0);
             }
             Self::Robotizer {
-                frequency_hz,
-                mix,
-                ..
+                frequency_hz, mix, ..
             } => {
                 *frequency_hz = frequency_hz.clamp(30.0, 1000.0);
                 *mix = mix.clamp(0.0, 1.0);
             }
             Self::RingMod {
-                frequency_hz,
-                mix,
-                ..
+                frequency_hz, mix, ..
             } => {
                 *frequency_hz = frequency_hz.clamp(10.0, 2000.0);
                 *mix = mix.clamp(0.0, 1.0);
@@ -351,6 +361,22 @@ impl Preset {
                 enabled: true,
                 strength,
             } => Some(*strength),
+            _ => None,
+        })
+    }
+
+    pub fn neural_voice(&self) -> Option<NeuralVoiceConfig> {
+        self.filters.iter().find_map(|filter| match filter {
+            FilterConfig::NeuralVoice {
+                enabled: true,
+                target_name,
+                embedding,
+                tau,
+            } => Some(NeuralVoiceConfig {
+                target_name: target_name.clone(),
+                embedding: embedding.clone(),
+                tau: *tau,
+            }),
             _ => None,
         })
     }
@@ -525,6 +551,12 @@ impl Preset {
                 enabled: true,
                 strength: default_strength(),
             },
+            "neural_voice" => FilterConfig::NeuralVoice {
+                enabled: true,
+                target_name: String::new(),
+                embedding: Vec::new(),
+                tau: 0.0,
+            },
             "gain" => FilterConfig::Gain {
                 enabled: true,
                 gain_db: 0.0,
@@ -634,6 +666,13 @@ pub struct ReverbConfig {
     pub room_size: f32,
     pub damping: f32,
     pub mix: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeuralVoiceConfig {
+    pub target_name: String,
+    pub embedding: Vec<f32>,
+    pub tau: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -828,12 +867,10 @@ pub fn builtin_presets() -> Vec<Preset> {
             pitch_semitones: 0.0,
             formant_semitones: 0.0,
             quality: Quality::Balanced,
-            filters: vec![
-                FilterConfig::Gain {
-                    enabled: true,
-                    gain_db: 0.0,
-                },
-            ],
+            filters: vec![FilterConfig::Gain {
+                enabled: true,
+                gain_db: 0.0,
+            }],
         },
         Preset {
             id: PRESET_BROADCAST.into(),
@@ -1023,14 +1060,12 @@ pub fn builtin_presets() -> Vec<Preset> {
             pitch_semitones: 0.0,
             formant_semitones: 0.0,
             quality: Quality::Balanced,
-            filters: vec![
-                FilterConfig::Reverb {
-                    enabled: true,
-                    room_size: 0.92,
-                    damping: 0.2,
-                    mix: 0.55,
-                },
-            ],
+            filters: vec![FilterConfig::Reverb {
+                enabled: true,
+                room_size: 0.92,
+                damping: 0.2,
+                mix: 0.55,
+            }],
         },
         Preset {
             id: PRESET_ANONYMOUS.into(),
@@ -1107,12 +1142,10 @@ pub fn builtin_presets() -> Vec<Preset> {
             pitch_semitones: 9.0,
             formant_semitones: 9.0,
             quality: Quality::Balanced,
-            filters: vec![
-                FilterConfig::HighPass {
-                    enabled: true,
-                    cutoff_hz: 120.0,
-                },
-            ],
+            filters: vec![FilterConfig::HighPass {
+                enabled: true,
+                cutoff_hz: 120.0,
+            }],
         },
         Preset {
             id: PRESET_RADIO_DEMON.into(),
@@ -1314,7 +1347,10 @@ mod tests {
     #[test]
     fn builtin_presets_count_and_unique_ids() {
         let builtins = builtin_presets();
-        assert!(builtins.len() >= 14, "should have at least 14 studio presets");
+        assert!(
+            builtins.len() >= 14,
+            "should have at least 14 studio presets"
+        );
         let mut ids = std::collections::HashSet::new();
         for p in &builtins {
             assert!(!p.id.is_empty());

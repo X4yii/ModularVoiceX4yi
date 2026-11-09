@@ -1,7 +1,7 @@
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
-use anyhow::{bail, Context, Result};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -107,7 +107,7 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
         .arg(path)
         .args(["-ar", "16000", "-ac", "1", "-f", "s16le", "-"])
         .output()
-        .context("no se pudo ejecutar ffmpeg para analizar la muestra de voz")?;
+        .context("ffmpeg no esta instalado o no se pudo ejecutar (requerido para leer la muestra de voz; instala ffmpeg)")?;
 
     if !output.status.success() {
         bail!("ffmpeg no pudo decodificar el archivo de audio");
@@ -123,7 +123,7 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
     let duration = sample_count as f32 / sample_rate as f32;
 
     let mut samples = Vec::with_capacity(sample_count);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let val = i16::from_le_bytes([chunk[0], chunk[1]]);
         samples.push(val as f32 / 32768.0);
     }
@@ -132,7 +132,7 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
     let frame_len = 512;
     let hop = 256;
     let min_lag = (sample_rate / 400) as usize; // up to 400 Hz
-    let max_lag = (sample_rate / 65) as usize;  // down to 65 Hz
+    let max_lag = (sample_rate / 65) as usize; // down to 65 Hz
     let mut pitches = Vec::new();
 
     let mut low_energy = 0.0f32;
@@ -148,20 +148,42 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
         }
         let rms = (sum_sq / frame_len as f32).sqrt();
         if rms >= 0.030 {
-            // Autocorrelation
+            // Autocorrelation with octave-halving prevention
             let mut best_corr = -1.0f32;
             let mut best_lag = 0;
-            for lag in min_lag..max_lag.min(frame_len / 2) {
+            let max_search = max_lag.min(frame_len / 2);
+            let mut corr_curve = vec![0.0f32; max_search];
+
+            for lag in min_lag..max_search {
                 let mut corr = 0.0f32;
                 for j in 0..(frame_len - lag) {
                     corr += chunk[j] * chunk[j + lag];
                 }
                 let norm_corr = corr / (sum_sq + 1e-6);
+                corr_curve[lag] = norm_corr;
                 if norm_corr > best_corr {
                     best_corr = norm_corr;
                     best_lag = lag;
                 }
             }
+
+            // If a candidate near half-lag exists with strong correlation, prefer the higher pitch (shorter lag)
+            if best_lag >= min_lag * 2 && best_corr > 0.40 {
+                let half_lag = best_lag / 2;
+                let mut half_best_c = -1.0f32;
+                let mut half_best_l = half_lag;
+                for l in half_lag.saturating_sub(4)..=(half_lag + 4).min(max_search - 1) {
+                    if corr_curve[l] > half_best_c {
+                        half_best_c = corr_curve[l];
+                        half_best_l = l;
+                    }
+                }
+                if half_best_c >= best_corr * 0.80 {
+                    best_lag = half_best_l;
+                    best_corr = half_best_c;
+                }
+            }
+
             if best_corr > 0.40 && best_lag > 0 {
                 let f0 = sample_rate as f32 / best_lag as f32;
                 pitches.push(f0);
@@ -170,7 +192,9 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
             // Spectral balance approximation
             let mut zc = 0;
             for j in 0..(frame_len - 1) {
-                if (chunk[j] >= 0.0 && chunk[j + 1] < 0.0) || (chunk[j] < 0.0 && chunk[j + 1] >= 0.0) {
+                if (chunk[j] >= 0.0 && chunk[j + 1] < 0.0)
+                    || (chunk[j] < 0.0 && chunk[j + 1] >= 0.0)
+                {
                     zc += 1;
                 }
             }
@@ -187,7 +211,7 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
     }
 
     let target_f0 = if !pitches.is_empty() {
-        pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        pitches.sort_by(|a, b| a.total_cmp(b));
         pitches[pitches.len() / 2]
     } else {
         130.0
@@ -213,6 +237,35 @@ pub fn analyze_audio_sample(path: &Path) -> Result<(f32, u32, f32, f32, f32, f32
         eq_mid,
         eq_high,
     ))
+}
+
+pub fn cloned_voice_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share/mvx/voices")
+    } else {
+        PathBuf::from("voices")
+    }
+}
+
+pub fn save_cloned_embedding(name: &str, emb: &[f32]) -> Result<()> {
+    let dir = cloned_voice_dir();
+    std::fs::create_dir_all(&dir)?;
+    let clean_name = name.to_lowercase().replace(' ', "_");
+    let path = dir.join(format!("{}.json", clean_name));
+    let json = serde_json::to_string(emb)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn load_cloned_embedding(name: &str) -> Result<Vec<f32>> {
+    let clean_name = name.to_lowercase().replace(' ', "_");
+    let path = cloned_voice_dir().join(format!("{}.json", clean_name));
+    if !path.exists() {
+        bail!("No existe el embedding para la voz {}", name);
+    }
+    let content = std::fs::read_to_string(path)?;
+    let emb: Vec<f32> = serde_json::from_str(&content)?;
+    Ok(emb)
 }
 
 impl VoiceCloneSession {
@@ -263,14 +316,22 @@ impl VoiceCloneSession {
     pub fn to_preset(&self) -> crate::Preset {
         use crate::presets::FilterConfig;
 
+        let embedding = load_cloned_embedding(&self.name).unwrap_or_default();
+
         crate::Preset {
             id: format!("clone_{}", self.name.to_lowercase().replace(' ', "_")),
-            name: format!("IA: {}", self.name),
+            name: format!("IA (alpha): {}", self.name),
             builtin: false,
             pitch_semitones: self.pitch_offset,
             formant_semitones: self.formant_offset,
             quality: crate::Quality::Balanced,
             filters: vec![
+                FilterConfig::NeuralVoice {
+                    enabled: true,
+                    target_name: self.name.clone(),
+                    embedding,
+                    tau: 0.0,
+                },
                 FilterConfig::HighPass {
                     enabled: true,
                     cutoff_hz: 80.0,

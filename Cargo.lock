@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "mvx-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "deep-filter-rt",
@@ -1917,29 +1917,32 @@ dependencies = [
  "mvx-core",
  "ndarray",
  "pipewire",
+ "realfft",
  "rtrb",
  "serde",
  "serde_json",
  "sherpa-onnx",
  "signalsmith-stretch",
  "tracing",
+ "tract-onnx",
 ]
 
 [[package]]
 name = "mvx-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "directories",
  "libc",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
 name = "mvx-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "mvx-core",
@@ -1949,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "mvx-tray"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ksni",
@@ -1960,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "mvx-tui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1972,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "mvxd"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1980,6 +1983,7 @@ dependencies = [
  "mvx-audio",
  "mvx-core",
  "mvx-ipc",
+ "sha2 0.10.9",
  "tracing",
  "tracing-subscriber",
 ]

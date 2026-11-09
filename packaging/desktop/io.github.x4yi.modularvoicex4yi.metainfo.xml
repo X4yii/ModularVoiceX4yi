@@ -22,8 +22,8 @@
     </ul>
   </description>
   <launchable type="desktop-id">modularvoicex4yi.desktop</launchable>
-  <url type="homepage">https://github.com/x4yi/ModularVoiceX4yi</url>
-  <url type="bugtracker">https://github.com/x4yi/ModularVoiceX4yi/issues</url>
+  <url type="homepage">https://github.com/X4yii/ModularVoiceX4yi</url>
+  <url type="bugtracker">https://github.com/X4yii/ModularVoiceX4yi/issues</url>
   <provides>
     <binary>mvxd</binary>
     <binary>mvx</binary>

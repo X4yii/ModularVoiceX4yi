@@ -80,7 +80,7 @@ pub struct DspChain {
     reverb: Option<Reverb>,
     humanizer: Option<Humanizer>,
     subsonic_filter: Biquad,
-    krisp_expander: DownwardExpander,
+    noise_expander: DownwardExpander,
     spectrum: SpectrumAnalyzer,
     last_metrics: DspMetrics,
 }
@@ -127,52 +127,67 @@ impl DspChain {
             .and_then(|p| p.noise_gate())
             .map(|g| NoiseGate::new(g.threshold_db, g.attack_ms, g.release_ms, SAMPLE_RATE));
 
-        let (eq_low, eq_mid, eq_high) = if let Some((low, mid, high)) =
-            params.preset.as_ref().and_then(|p| p.equalizer())
-        {
-            (
-                Some(Biquad::low_shelf(120.0, SAMPLE_RATE, low)),
-                Some(Biquad::peaking_eq(1800.0, SAMPLE_RATE, mid, 1.0)),
-                Some(Biquad::high_shelf(8000.0, SAMPLE_RATE, high)),
-            )
-        } else {
-            (None, None, None)
-        };
+        let (eq_low, eq_mid, eq_high) =
+            if let Some((low, mid, high)) = params.preset.as_ref().and_then(|p| p.equalizer()) {
+                (
+                    Some(Biquad::low_shelf(120.0, SAMPLE_RATE, low)),
+                    Some(Biquad::peaking_eq(1800.0, SAMPLE_RATE, mid, 1.0)),
+                    Some(Biquad::high_shelf(8000.0, SAMPLE_RATE, high)),
+                )
+            } else {
+                (None, None, None)
+            };
 
-        let compressor = params.preset.as_ref().and_then(|p| p.compressor()).map(|c| {
-            Compressor::new(
-                c.threshold_db,
-                c.ratio,
-                c.attack_ms,
-                c.release_ms,
-                c.makeup_db,
-                SAMPLE_RATE,
-            )
-        });
+        let compressor = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.compressor())
+            .map(|c| {
+                Compressor::new(
+                    c.threshold_db,
+                    c.ratio,
+                    c.attack_ms,
+                    c.release_ms,
+                    c.makeup_db,
+                    SAMPLE_RATE,
+                )
+            });
 
-        let chorus = params.preset.as_ref().and_then(|p| p.chorus()).map(|c| {
-            Chorus::new(c.rate_hz, c.depth_ms, c.mix, SAMPLE_RATE)
-        });
+        let chorus = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.chorus())
+            .map(|c| Chorus::new(c.rate_hz, c.depth_ms, c.mix, SAMPLE_RATE));
 
-        let robotizer = params.preset.as_ref().and_then(|p| p.robotizer()).map(|(f, m)| {
-            Robotizer::new(f, m)
-        });
+        let robotizer = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.robotizer())
+            .map(|(f, m)| Robotizer::new(f, m));
 
-        let ring_mod = params.preset.as_ref().and_then(|p| p.ring_mod()).map(|(f, m)| {
-            RingMod::new(f, m)
-        });
+        let ring_mod = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.ring_mod())
+            .map(|(f, m)| RingMod::new(f, m));
 
-        let distortion = params.preset.as_ref().and_then(|p| p.distortion()).map(|d| {
-            Distortion::new(d.drive, d.crush_bits, d.mix)
-        });
+        let distortion = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.distortion())
+            .map(|d| Distortion::new(d.drive, d.crush_bits, d.mix));
 
-        let reverb = params.preset.as_ref().and_then(|p| p.reverb()).map(|r| {
-            Reverb::new(r.room_size, r.damping, r.mix)
-        });
+        let reverb = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.reverb())
+            .map(|r| Reverb::new(r.room_size, r.damping, r.mix));
 
-        let humanizer = params.preset.as_ref().and_then(|p| p.humanizer()).map(|(d, r)| {
-            Humanizer::new(d, r)
-        });
+        let humanizer = params
+            .preset
+            .as_ref()
+            .and_then(|p| p.humanizer())
+            .map(|(d, r)| Humanizer::new(d, r));
 
         Ok(Self {
             stretch,
@@ -209,7 +224,7 @@ impl DspChain {
             reverb,
             humanizer,
             subsonic_filter: Biquad::high_pass(85.0, SAMPLE_RATE, 0.707),
-            krisp_expander: DownwardExpander::new(-38.0, 3.0, 1.5, 60.0, 40.0, SAMPLE_RATE),
+            noise_expander: DownwardExpander::new(-38.0, 3.0, 1.5, 60.0, 40.0, SAMPLE_RATE),
             spectrum: SpectrumAnalyzer::new(SAMPLE_RATE),
             last_metrics: DspMetrics::default(),
         })
@@ -257,29 +272,23 @@ impl DspChain {
             )
         });
 
-        self.chorus = preset.chorus().map(|c| {
-            Chorus::new(c.rate_hz, c.depth_ms, c.mix, SAMPLE_RATE)
-        });
+        self.chorus = preset
+            .chorus()
+            .map(|c| Chorus::new(c.rate_hz, c.depth_ms, c.mix, SAMPLE_RATE));
 
-        self.robotizer = preset.robotizer().map(|(f, m)| {
-            Robotizer::new(f, m)
-        });
+        self.robotizer = preset.robotizer().map(|(f, m)| Robotizer::new(f, m));
 
-        self.ring_mod = preset.ring_mod().map(|(f, m)| {
-            RingMod::new(f, m)
-        });
+        self.ring_mod = preset.ring_mod().map(|(f, m)| RingMod::new(f, m));
 
-        self.distortion = preset.distortion().map(|d| {
-            Distortion::new(d.drive, d.crush_bits, d.mix)
-        });
+        self.distortion = preset
+            .distortion()
+            .map(|d| Distortion::new(d.drive, d.crush_bits, d.mix));
 
-        self.reverb = preset.reverb().map(|r| {
-            Reverb::new(r.room_size, r.damping, r.mix)
-        });
+        self.reverb = preset
+            .reverb()
+            .map(|r| Reverb::new(r.room_size, r.damping, r.mix));
 
-        self.humanizer = preset.humanizer().map(|(d, r)| {
-            Humanizer::new(d, r)
-        });
+        self.humanizer = preset.humanizer().map(|(d, r)| Humanizer::new(d, r));
     }
 
     /// Process mono samples in place. `input` and `output` must have the same
@@ -349,7 +358,8 @@ impl DspChain {
         let effective_pitch = self.last_pitch + hum_offset;
 
         if (effective_pitch - previous_pitch).abs() > 0.0001 {
-            self.stretch.set_transpose_factor_semitones(effective_pitch, Some(TONALITY_LIMIT));
+            self.stretch
+                .set_transpose_factor_semitones(effective_pitch, Some(TONALITY_LIMIT));
         }
 
         let formant_target = f32::from_bits(self.formant_control.load(Ordering::Relaxed));
@@ -361,7 +371,8 @@ impl DspChain {
             CONTROL_SMOOTH_SECONDS,
         );
         if (self.last_formant - previous_formant).abs() > 0.0001 {
-            self.stretch.set_formant_factor_semitones(self.last_formant, false);
+            self.stretch
+                .set_formant_factor_semitones(self.last_formant, false);
         }
 
         let has_pitch_effect = effective_pitch.abs() > 0.001 || self.last_formant.abs() > 0.001;
@@ -402,7 +413,7 @@ impl DspChain {
                 }
             }
 
-            // 3. Supresion de ruido DeepFilterNet3 (Krisp-grade)
+            // 3. Supresion de ruido DeepFilterNet3
             if noise_on {
                 let mut tmp = [0.0f32; MAX_CHUNK];
                 tmp[..len].copy_from_slice(&self.scratch[..len]);
@@ -411,7 +422,8 @@ impl DspChain {
 
             // 4. Modulación de Tono y Formantes
             if has_pitch_effect {
-                self.stretch.process(&self.scratch[..len], &mut self.pitch_out[..len]);
+                self.stretch
+                    .process(&self.scratch[..len], &mut self.pitch_out[..len]);
             } else {
                 self.pitch_out[..len].copy_from_slice(&self.scratch[..len]);
             }
@@ -485,11 +497,11 @@ impl DspChain {
                 }
             }
 
-            // 9. Expansor Descendente Inteligente estilo Krisp:
+            // 9. Expansor Descendente Inteligente suave:
             // Elimina el siseo residual y ruido de fondo en reposo / pausas cuando la reducción de ruido está activa.
             if noise_on {
                 for s in output[pos..pos + len].iter_mut() {
-                    let (cleaned, red_db) = self.krisp_expander.process_sample(*s);
+                    let (cleaned, red_db) = self.noise_expander.process_sample(*s);
                     *s = cleaned;
                     if red_db > max_gate_red {
                         max_gate_red = red_db;
@@ -513,6 +525,48 @@ impl DspChain {
             comp_reduction_db: max_comp_red,
             spectrum: spectrum_bands,
         };
+    }
+
+    /// Post-effects for neural voice output (EQ, Compressor, Gain, Limiter)
+    pub fn process_post_effects(&mut self, audio: &mut [f32]) {
+        let total = audio.len();
+        if total == 0 {
+            return;
+        }
+
+        if let Some(eq) = self.eq_low.as_mut() {
+            for s in audio.iter_mut() {
+                *s = eq.process(*s);
+            }
+        }
+        if let Some(eq) = self.eq_mid.as_mut() {
+            for s in audio.iter_mut() {
+                *s = eq.process(*s);
+            }
+        }
+        if let Some(eq) = self.eq_high.as_mut() {
+            for s in audio.iter_mut() {
+                *s = eq.process(*s);
+            }
+        }
+
+        if let Some(comp) = self.compressor.as_mut() {
+            for s in audio.iter_mut() {
+                let (compressed, _) = comp.process_sample(*s);
+                *s = compressed;
+            }
+        }
+
+        let gain_db = f32::from_bits(self.gain_db.load(Ordering::Relaxed));
+        let gain = if self.mute.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            10f32.powf(gain_db / 20.0)
+        };
+
+        for dst in audio.iter_mut() {
+            *dst = soft_limit(*dst * gain);
+        }
     }
 
     fn apply_gate(&mut self, samples: &mut [f32], gain: f32, output: &mut [f32]) {
@@ -617,7 +671,10 @@ impl DeepFilterReducer {
                     self.noisy_view[[0, idx]] = self.input_buf[idx];
                 }
 
-                if let Ok(lsnr) = self.df.process(self.noisy_view.view(), self.enh_view.view_mut()) {
+                if let Ok(lsnr) = self
+                    .df
+                    .process(self.noisy_view.view(), self.enh_view.view_mut())
+                {
                     self.last_lsnr = lsnr;
                     for idx in 0..DF_HOP_SIZE {
                         let clean = self.enh_view[[0, idx]];
@@ -872,7 +929,7 @@ impl NoiseGate {
     }
 }
 
-/// Downward expander for smooth, natural noise-floor suppression (Krisp-style).
+/// Downward expander for smooth, natural noise-floor suppression.
 /// Unlike a hard gate, it attenuates progressively below threshold without clicks or clipping words.
 pub struct DownwardExpander {
     threshold_db: f32,
@@ -1221,10 +1278,7 @@ impl Reverb {
             CombFilter::new(1277, feedback, damp),
             CombFilter::new(1356, feedback, damp),
         ];
-        let allpasses = [
-            AllpassFilter::new(225, 0.5),
-            AllpassFilter::new(556, 0.5),
-        ];
+        let allpasses = [AllpassFilter::new(225, 0.5), AllpassFilter::new(556, 0.5)];
         Self {
             combs,
             allpasses,
@@ -1536,7 +1590,10 @@ mod tests {
                 mid_peak = mid_peak.max(out.abs());
             }
         }
-        assert!(mid_peak > 0.9, "1000 Hz should pass through, got {mid_peak}");
+        assert!(
+            mid_peak > 0.9,
+            "1000 Hz should pass through, got {mid_peak}"
+        );
     }
 
     #[test]
@@ -1549,14 +1606,20 @@ mod tests {
             out_val = out;
             let _ = red;
         }
-        assert!(out_val < 0.0005, "gate should stay closed on sub-threshold signal");
+        assert!(
+            out_val < 0.0005,
+            "gate should stay closed on sub-threshold signal"
+        );
 
         // Feed strong signal at 0 dB (amplitude 0.5)
         for _ in 0..2000 {
             let (out, _) = gate.process_sample(0.5);
             out_val = out;
         }
-        assert!((out_val - 0.5).abs() < 0.05, "gate should open on strong signal");
+        assert!(
+            (out_val - 0.5).abs() < 0.05,
+            "gate should open on strong signal"
+        );
 
         // Feed silence again for 10000 samples (~200ms) to ensure release closes
         for _ in 0..10000 {
@@ -1600,7 +1663,10 @@ mod tests {
             last_gain = out / 0.18;
             let _ = red;
         }
-        assert!((last_gain - 1.0).abs() < 0.05, "speech signal should pass transparently");
+        assert!(
+            (last_gain - 1.0).abs() < 0.05,
+            "speech signal should pass transparently"
+        );
 
         // Noise floor at -50 dB (amp ~0.003) should be heavily attenuated
         let mut noise_out = 0.0f32;
@@ -1610,8 +1676,14 @@ mod tests {
             noise_out = out;
             noise_red = red;
         }
-        assert!(noise_red > 15.0, "noise floor should suffer downward expansion (>15 dB reduction, got {noise_red})");
-        assert!(noise_out < 0.001, "noise floor amplitude should drop significantly");
+        assert!(
+            noise_red > 15.0,
+            "noise floor should suffer downward expansion (>15 dB reduction, got {noise_red})"
+        );
+        assert!(
+            noise_out < 0.001,
+            "noise floor amplitude should drop significantly"
+        );
     }
 
     #[test]
@@ -1630,5 +1702,24 @@ mod tests {
 
         let lsnr = df.process(noisy.view(), enh.view_mut()).unwrap();
         assert!(lsnr.is_finite(), "lsnr should be finite, got {lsnr}");
+    }
+
+    #[test]
+    fn openvoice_model_loads_with_tract() {
+        use tract_onnx::prelude::*;
+        let path = mvx_core::openvoice_dir().join("tone_extract.onnx");
+        if path.exists() {
+            let model = tract_onnx::onnx()
+                .model_for_path(&path)
+                .expect("Failed to parse tone_extract.onnx");
+            println!("Loaded tone_extract: inputs={}", model.inputs.len());
+        }
+        let color_path = mvx_core::openvoice_dir().join("tone_color.onnx");
+        if color_path.exists() {
+            let model = tract_onnx::onnx()
+                .model_for_path(&color_path)
+                .expect("Failed to parse tone_color.onnx");
+            println!("Loaded tone_color: inputs={}", model.inputs.len());
+        }
     }
 }

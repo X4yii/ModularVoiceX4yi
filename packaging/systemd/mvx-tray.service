@@ -1,6 +1,6 @@
 [Unit]
 Description=MVX StatusNotifierItem tray
-Documentation=https://github.com/x4yi/ModularVoiceX4yi
+Documentation=https://github.com/X4yii/ModularVoiceX4yi
 After=graphical-session.target mvxd.service
 PartOf=graphical-session.target
 Wants=mvxd.service

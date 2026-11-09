@@ -11,26 +11,61 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    Hello { protocol: u32 },
+    Hello {
+        protocol: u32,
+    },
     GetState,
-    SetInput { name: String },
-    SetGain { gain_db: f32 },
-    SetMute { mute: bool },
-    ApplyPreset { id: String },
-    UpsertPreset { preset: Preset, activate: bool },
-    DeletePreset { id: String },
-    ResetPreset { id: String },
-    EnrollVoice { name: String, seconds: u32 },
-    DeleteVoice { name: String },
-    SetBypass { bypass: bool },
-    SetMonitor { enabled: bool, gain_db: f32 },
+    SetInput {
+        name: String,
+    },
+    SetGain {
+        gain_db: f32,
+    },
+    SetMute {
+        mute: bool,
+    },
+    ApplyPreset {
+        id: String,
+    },
+    UpsertPreset {
+        preset: Preset,
+        activate: bool,
+    },
+    DeletePreset {
+        id: String,
+    },
+    ResetPreset {
+        id: String,
+    },
+    EnrollVoice {
+        name: String,
+        seconds: u32,
+    },
+    DeleteVoice {
+        name: String,
+    },
+    SetBypass {
+        bypass: bool,
+    },
+    SetMonitor {
+        enabled: bool,
+        gain_db: f32,
+    },
     StartLoopRecord,
     StopLoopTest,
-    TriggerSound { id: String },
+    TriggerSound {
+        id: String,
+    },
     StopSounds,
-    ResetConfig { target: ConfigResetTarget },
-    CloneVoiceValidate { audio_path: String },
-    CloneVoiceSave { session: mvx_core::VoiceCloneSession },
+    ResetConfig {
+        target: ConfigResetTarget,
+    },
+    CloneVoiceValidate {
+        audio_path: String,
+    },
+    CloneVoiceSave {
+        session: mvx_core::VoiceCloneSession,
+    },
     InstallModels,
     ReloadAudio,
     Ping,
@@ -73,8 +108,8 @@ pub struct Client {
 impl Client {
     pub fn connect(path: &Path) -> std::io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
         let reader = BufReader::new(stream.try_clone()?);
         Ok(Self {
             writer: stream,
@@ -83,6 +118,12 @@ impl Client {
     }
 
     pub fn request(&mut self, request: &Request) -> anyhow::Result<Response> {
+        // La extraccion neuronal de timbre tarda mas que el resto de peticiones.
+        let read_timeout = match request {
+            Request::CloneVoiceValidate { .. } => Duration::from_secs(90),
+            _ => Duration::from_secs(5),
+        };
+        self.writer.set_read_timeout(Some(read_timeout))?;
         let mut line = serde_json::to_vec(request)?;
         line.push(b'\n');
         self.writer.write_all(&line)?;

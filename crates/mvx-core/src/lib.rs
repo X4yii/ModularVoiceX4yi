@@ -1,5 +1,11 @@
 //! Shared state, configuration and types used by the MVX daemon, audio engine and clients.
 
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::needless_range_loop
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -32,8 +38,8 @@ pub use presets::{
 pub use soundboard::{decode_wav, encode_wav_i16, load_all_sounds, LoadedSound};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: u32 = 2;
-pub const CONFIG_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 1;
 pub const SOCKET_NAME: &str = "mvxd.sock";
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -322,8 +328,7 @@ impl SharedState {
         snap.output_peak_db =
             linear_to_db(f32::from_bits(self.output_peak.load(Ordering::Relaxed)));
         snap.input_rms_db = linear_to_db(f32::from_bits(self.input_rms.load(Ordering::Relaxed)));
-        snap.output_rms_db =
-            linear_to_db(f32::from_bits(self.output_rms.load(Ordering::Relaxed)));
+        snap.output_rms_db = linear_to_db(f32::from_bits(self.output_rms.load(Ordering::Relaxed)));
         snap.gate_reduction_db = f32::from_bits(self.gate_reduction_db.load(Ordering::Relaxed));
         snap.comp_reduction_db = f32::from_bits(self.comp_reduction_db.load(Ordering::Relaxed));
         snap.spectrum_db = self
@@ -486,7 +491,8 @@ impl SharedState {
     }
 
     pub fn set_config_parse_error(&self, had_error: bool) {
-        self.config_had_parse_error.store(had_error, Ordering::Relaxed);
+        self.config_had_parse_error
+            .store(had_error, Ordering::Relaxed);
     }
 
     pub fn config_had_parse_error(&self) -> bool {
@@ -561,8 +567,7 @@ impl SharedState {
 
     pub fn add_input_clip(&self, samples: u64) {
         if samples > 0 {
-            self.input_clip_count
-                .fetch_add(samples, Ordering::Relaxed);
+            self.input_clip_count.fetch_add(samples, Ordering::Relaxed);
         }
     }
 
@@ -858,8 +863,23 @@ pub fn state_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".").join(".local/state/mvx"))
 }
 
+/// Directorio de modelos. Se puede sobrescribir con `MVX_MODELS_DIR`.
 pub fn models_dir() -> PathBuf {
-    data_dir().join("models")
+    match std::env::var_os("MVX_MODELS_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => data_dir().join("models"),
+    }
+}
+
+/// Directorio de los modelos OpenVoice V2 (clonacion de voz, ALPHA).
+pub fn openvoice_dir() -> PathBuf {
+    models_dir().join("openvoice")
+}
+
+/// Verdadero si los modelos ONNX de OpenVoice V2 estan instalados.
+pub fn openvoice_models_ready() -> bool {
+    let dir = openvoice_dir();
+    dir.join("tone_extract.onnx").is_file() && dir.join("tone_color.onnx").is_file()
 }
 
 pub fn speaker_model_path() -> PathBuf {
@@ -912,8 +932,7 @@ pub fn validate_profile_name(name: &str) -> Result<(), String> {
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
         return Err(
-            "el nombre del perfil solo puede contener letras, dígitos, '_' y '-'"
-                .to_string(),
+            "el nombre del perfil solo puede contener letras, dígitos, '_' y '-'".to_string(),
         );
     }
     if name.chars().count() > 64 {

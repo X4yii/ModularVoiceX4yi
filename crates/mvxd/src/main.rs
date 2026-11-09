@@ -201,42 +201,32 @@ fn handle_client(
                     Err(_) => Response::error("el motor de audio no está disponible"),
                 }
             }
-            Request::SetBypass { bypass } => {
-                match sender.send(AudioCommand::SetBypass(bypass)) {
-                    Ok(()) => Response::Ok,
-                    Err(_) => Response::error("el motor de audio no está disponible"),
-                }
-            }
+            Request::SetBypass { bypass } => match sender.send(AudioCommand::SetBypass(bypass)) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
             Request::SetMonitor { enabled, gain_db } => {
                 match sender.send(AudioCommand::SetMonitor { enabled, gain_db }) {
                     Ok(()) => Response::Ok,
                     Err(_) => Response::error("el motor de audio no está disponible"),
                 }
             }
-            Request::StartLoopRecord => {
-                match sender.send(AudioCommand::StartLoopRecord) {
-                    Ok(()) => Response::Ok,
-                    Err(_) => Response::error("el motor de audio no está disponible"),
-                }
-            }
-            Request::StopLoopTest => {
-                match sender.send(AudioCommand::StopLoopTest) {
-                    Ok(()) => Response::Ok,
-                    Err(_) => Response::error("el motor de audio no está disponible"),
-                }
-            }
-            Request::TriggerSound { id } => {
-                match sender.send(AudioCommand::TriggerSound { id }) {
-                    Ok(()) => Response::Ok,
-                    Err(_) => Response::error("el motor de audio no está disponible"),
-                }
-            }
-            Request::StopSounds => {
-                match sender.send(AudioCommand::StopSounds) {
-                    Ok(()) => Response::Ok,
-                    Err(_) => Response::error("el motor de audio no está disponible"),
-                }
-            }
+            Request::StartLoopRecord => match sender.send(AudioCommand::StartLoopRecord) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::StopLoopTest => match sender.send(AudioCommand::StopLoopTest) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::TriggerSound { id } => match sender.send(AudioCommand::TriggerSound { id }) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
+            Request::StopSounds => match sender.send(AudioCommand::StopSounds) {
+                Ok(()) => Response::Ok,
+                Err(_) => Response::error("el motor de audio no está disponible"),
+            },
             Request::ResetConfig { target } => {
                 match sender.send(AudioCommand::ResetConfig(target)) {
                     Ok(()) => Response::Ok,
@@ -305,50 +295,143 @@ fn spawn_model_install(shared: Arc<SharedState>, busy: Arc<AtomicBool>, sender: 
         .ok();
 }
 
+struct ModelSpec {
+    url: &'static str,
+    dest: std::path::PathBuf,
+    min_bytes: u64,
+    sha256: Option<&'static str>,
+}
+
+fn model_specs() -> Vec<ModelSpec> {
+    let ov = "https://huggingface.co/Hinotsuba/OpenVoice-ONNX-v2/resolve/main";
+    let ov_dir = mvx_core::openvoice_dir();
+    let mut specs = vec![
+        ModelSpec {
+            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+            dest: mvx_core::speaker_model_path(),
+            min_bytes: 20_000_000,
+            sha256: Some("aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"),
+        },
+        ModelSpec {
+            url: "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx",
+            dest: mvx_core::vad_model_path(),
+            min_bytes: 1_000_000,
+            sha256: None,
+        },
+    ];
+    // Modelos de clonacion de voz (ALPHA). Opcionales: MVX_SKIP_CLONE_MODELS=1.
+    if std::env::var_os("MVX_SKIP_CLONE_MODELS").is_none() {
+        specs.push(ModelSpec {
+            url: Box::leak(format!("{ov}/tone_extract.onnx").into_boxed_str()),
+            dest: ov_dir.join("tone_extract.onnx"),
+            min_bytes: 1_000_000,
+            sha256: Some("e91c2cb696e199d2519ed8b62ca6e3c8e42cb99ca13955dd6e188051486e681c"),
+        });
+        specs.push(ModelSpec {
+            url: Box::leak(format!("{ov}/tone_color.onnx").into_boxed_str()),
+            dest: ov_dir.join("tone_color.onnx"),
+            min_bytes: 100_000_000,
+            sha256: Some("896195b84b0cb87a828bb8cab06577e9c024356bc9727b1a8f4174154bc0affa"),
+        });
+        specs.push(ModelSpec {
+            url: Box::leak(format!("{ov}/tone_config.json").into_boxed_str()),
+            dest: ov_dir.join("tone_config.json"),
+            min_bytes: 100,
+            sha256: None,
+        });
+    }
+    specs
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
 fn install_models() -> Result<()> {
     let dir = mvx_core::models_dir();
-    std::fs::create_dir_all(&dir)?;
-    let downloads = [
-        (
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
-            mvx_core::speaker_model_path(),
-        ),
-        (
-            "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx",
-            mvx_core::vad_model_path(),
-        ),
-    ];
-    for (url, dest) in downloads {
-        if dest.exists() {
+    std::fs::create_dir_all(&dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
+    let mut failures = Vec::new();
+    for spec in model_specs() {
+        if spec.dest.is_file() {
             continue;
         }
-        let part = dest.with_extension("onnx.part");
-        info!("descargando {} -> {}", url, dest.display());
-        download(url, &part)?;
-        std::fs::rename(&part, &dest)?;
+        if let Some(parent) = spec.dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let part = spec.dest.with_extension("part");
+        info!("descargando {} -> {}", spec.url, spec.dest.display());
+        let result = download(spec.url, &part).and_then(|_| {
+            let size = std::fs::metadata(&part)?.len();
+            if size < spec.min_bytes {
+                anyhow::bail!("archivo incompleto ({size} bytes)");
+            }
+            if let Some(expected) = spec.sha256 {
+                let actual = sha256_file(&part)?;
+                if actual != expected {
+                    anyhow::bail!("checksum SHA-256 invalido ({actual})");
+                }
+            }
+            std::fs::rename(&part, &spec.dest)?;
+            Ok(())
+        });
+        if let Err(err) = result {
+            let _ = std::fs::remove_file(&part);
+            failures.push(format!("{}: {err}", spec.dest.display()));
+        }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", failures.join("; "))
+    }
 }
 
 fn download(url: &str, dest: &Path) -> Result<()> {
-    let status = std::process::Command::new("curl")
-        .args([
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--retry",
-            "2",
-            "--connect-timeout",
-            "20",
-            "-o",
-        ])
-        .arg(dest)
-        .arg(url)
-        .status()
-        .context("no se pudo ejecutar curl (¿está instalado?)")?;
+    let have = |tool: &str| {
+        std::process::Command::new(tool)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    };
+    let status = if have("curl") {
+        std::process::Command::new("curl")
+            .args([
+                "-L",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--retry",
+                "3",
+                "--connect-timeout",
+                "20",
+                "-o",
+            ])
+            .arg(dest)
+            .arg(url)
+            .status()
+            .context("fallo al ejecutar curl")?
+    } else if have("wget") {
+        std::process::Command::new("wget")
+            .args(["-q", "--tries=3", "--timeout=20", "-O"])
+            .arg(dest)
+            .arg(url)
+            .status()
+            .context("fallo al ejecutar wget")?
+    } else {
+        anyhow::bail!("se requiere curl o wget para descargar modelos");
+    };
     if !status.success() {
-        anyhow::bail!("curl terminó con {status}");
+        anyhow::bail!("la descarga termino con {status} (revisa tu conexion)");
     }
     Ok(())
 }

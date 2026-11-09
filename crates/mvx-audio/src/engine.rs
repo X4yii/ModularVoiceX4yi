@@ -170,6 +170,7 @@ struct Engine {
     active_sound_index: Arc<std::sync::atomic::AtomicI32>,
     active_sound_cursor: Arc<std::sync::atomic::AtomicUsize>,
     speaker: Option<SpeakerWorker>,
+    neural_worker: Option<crate::neural_vc::NeuralVoiceWorker>,
     filter_producer: Option<Producer<Preset>>,
     last_retry: Instant,
     link_warned: bool,
@@ -215,6 +216,8 @@ struct CaptureData {
     mono: Vec<f32>,
     processed: Vec<f32>,
     speaker: Option<Producer<f32>>,
+    neural_vc_in: Option<Producer<f32>>,
+    neural_vc_out: Option<Consumer<f32>>,
     shared: Arc<SharedState>,
     loop_state: Arc<AtomicU32>,
     loop_buffer: Vec<f32>,
@@ -405,6 +408,7 @@ impl Engine {
             active_sound_index,
             active_sound_cursor,
             speaker: None,
+            neural_worker: None,
             filter_producer: None,
             last_retry: Instant::now() - Duration::from_secs(10),
             link_warned: false,
@@ -414,7 +418,10 @@ impl Engine {
 
         let clip_infos: Vec<_> = engine.sounds.iter().map(|s| s.to_info()).collect();
         engine.shared.set_soundboard(clip_infos, None);
-        engine.shared.set_monitor(engine.config.audio.monitor_enabled, engine.config.audio.monitor_gain_db);
+        engine.shared.set_monitor(
+            engine.config.audio.monitor_enabled,
+            engine.config.audio.monitor_gain_db,
+        );
         engine.shared.set_loop_test_state("idle");
 
         engine.shared.set_presets(engine.presets.presets.clone());
@@ -497,10 +504,16 @@ impl Engine {
         let old = &self.active_preset;
         old.quality != next.quality
             || old.speaker_lock().is_some() != next.speaker_lock().is_some()
+            || old.neural_voice().is_some() != next.neural_voice().is_some()
             || old
                 .speaker_lock()
                 .zip(next.speaker_lock())
                 .map(|(a, b)| a.profile != b.profile)
+                .unwrap_or(false)
+            || old
+                .neural_voice()
+                .zip(next.neural_voice())
+                .map(|(a, b)| a.target_name != b.target_name)
                 .unwrap_or(false)
     }
 
@@ -745,7 +758,8 @@ impl Engine {
             AudioCommand::SetMonitor { enabled, gain_db } => {
                 self.monitor_enabled.store(enabled, Ordering::Relaxed);
                 let gain_lin = 10f32.powf(gain_db / 20.0);
-                self.monitor_gain.store(gain_lin.to_bits(), Ordering::Relaxed);
+                self.monitor_gain
+                    .store(gain_lin.to_bits(), Ordering::Relaxed);
                 self.config.audio.monitor_enabled = enabled;
                 self.config.audio.monitor_gain_db = gain_db;
                 let _ = self.config.save();
@@ -806,9 +820,48 @@ impl Engine {
             AudioCommand::CloneVoiceValidate(path_str) => {
                 let mut session = mvx_core::VoiceCloneSession::default();
                 let path = std::path::Path::new(&path_str);
-                if let Err(e) = session.validate_source(path) {
+                let resolved = mvx_core::clone::resolve_path(path);
+                if let Err(e) = session.validate_source(&resolved) {
                     session.status = mvx_core::CloneStatus::Error;
                     session.status_message = e.to_string();
+                } else {
+                    let models_dir = mvx_core::models_dir();
+                    match crate::neural_vc::NeuralVoiceConverter::new(&models_dir) {
+                        Ok(converter) => {
+                            match crate::neural_vc::decode_audio_file(&resolved, 48_000) {
+                                Ok(samples) => match converter.extract_embedding_48k(&samples) {
+                                    Ok(emb) => {
+                                        if let Err(err) = mvx_core::clone::save_cloned_embedding(
+                                            &session.name,
+                                            &emb,
+                                        ) {
+                                            session.status_message =
+                                                format!("Error guardando embedding: {err}");
+                                        } else {
+                                            session.model_target =
+                                                "OpenVoice V2 (Neural Timbre ONNX)".into();
+                                            session.status_message = format!(
+                                                    "IA Neural 256-dim lista | {:.1}s | F0: {:.0}Hz | Pitch: {:+.1}st",
+                                                    session.duration_secs, session.pitch_offset, session.pitch_offset
+                                                );
+                                        }
+                                    }
+                                    Err(err) => {
+                                        session.status_message =
+                                            format!("Error extracción embedding: {err}");
+                                    }
+                                },
+                                Err(err) => {
+                                    session.status_message =
+                                        format!("Error decodificación audio: {err}");
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            session.status_message =
+                                format!("Modelos neuronales no disponibles: {err}");
+                        }
+                    }
                 }
                 self.shared.set_clone_session(&session);
             }
@@ -818,7 +871,7 @@ impl Engine {
                 self.mark_presets_dirty();
                 self.flush_presets(true);
                 self.shared.set_presets(self.presets.presets.clone());
-                let _ = self.apply_preset(preset, false);
+                let _ = self.apply_preset(preset, true);
             }
             AudioCommand::ReloadAudio => {
                 if let Err(err) = self.rebuild_audio_path() {
@@ -889,6 +942,7 @@ impl Engine {
         self.monitor_playback = None;
         self.filter_producer = None;
         self.speaker = None;
+        self.neural_worker = None;
         self.links.clear();
         self.linked_ports.clear();
         self.link_warned = false;
@@ -928,12 +982,39 @@ impl Engine {
             None
         };
 
+        let (neural_in, neural_out) = if let Some(vc_cfg) = self.active_preset.neural_voice() {
+            tracing::warn!(
+                "clonacion de voz neuronal en etapa ALPHA: la calidad y la estabilidad no estan garantizadas"
+            );
+            if !mvx_core::openvoice_models_ready() {
+                tracing::warn!(
+                    "modelos OpenVoice V2 ausentes; se usa el DSP clasico (ejecuta `mvx models install`)"
+                );
+            }
+            let models_dir = mvx_core::models_dir();
+            let start = crate::neural_vc::NeuralVoiceWorker::start(
+                &models_dir,
+                vc_cfg.embedding,
+                vc_cfg.tau,
+            );
+            self.neural_worker = start.worker;
+            (start.producer, start.consumer)
+        } else {
+            self.neural_worker = None;
+            (None, None)
+        };
+
         let (producer, consumer) = RingBuffer::new(RING_CAPACITY);
         let (mon_producer, mon_consumer) = RingBuffer::new(RING_CAPACITY);
         self.playback = Some(self.create_playback(consumer)?);
         self.monitor_playback = Some(self.create_monitor(mon_consumer)?);
-        let (capture, filter_producer) =
-            self.create_capture(producer, Some(mon_producer), speaker_producer)?;
+        let (capture, filter_producer) = self.create_capture(
+            producer,
+            Some(mon_producer),
+            speaker_producer,
+            neural_in,
+            neural_out,
+        )?;
         self.capture = Some(capture);
         self.filter_producer = Some(filter_producer);
         Ok(())
@@ -960,6 +1041,8 @@ impl Engine {
         producer: Producer<f32>,
         monitor_producer: Option<Producer<f32>>,
         speaker: Option<Producer<f32>>,
+        neural_vc_in: Option<Producer<f32>>,
+        neural_vc_out: Option<Consumer<f32>>,
     ) -> Result<(Capture, Producer<Preset>)> {
         let stream =
             pw::stream::StreamRc::new(self.core.clone(), "mvx-capture", self.capture_props())
@@ -1001,6 +1084,8 @@ impl Engine {
             mono: vec![0.0; 8_192],
             processed: vec![0.0; 8_192],
             speaker,
+            neural_vc_in,
+            neural_vc_out,
             shared: self.shared.clone(),
             loop_state: self.loop_state.clone(),
             loop_buffer: Vec::with_capacity(8 * SAMPLE_RATE as usize),
@@ -1122,14 +1207,37 @@ impl Engine {
                         }
                     }
 
+                    if let Some(neural_vc_in) = data.neural_vc_in.as_mut() {
+                        for &s in &data.mono[..chunk_frames] {
+                            let _ = neural_vc_in.push(s);
+                        }
+                    }
+
                     if let Ok(new_preset) = data.filter_consumer.pop() {
                         data.dsp.update_preset_filters(&new_preset);
                     }
 
-                    data.dsp.process(
-                        &data.mono[..chunk_frames],
-                        &mut data.processed[..chunk_frames],
-                    );
+                    let mut used_neural = false;
+                    if let Some(neural_vc_out) = data.neural_vc_out.as_mut() {
+                        if neural_vc_out.slots() >= chunk_frames {
+                            for dst in data.processed[..chunk_frames].iter_mut() {
+                                if let Ok(sample) = neural_vc_out.pop() {
+                                    *dst = sample;
+                                    used_neural = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !used_neural {
+                        data.dsp.process(
+                            &data.mono[..chunk_frames],
+                            &mut data.processed[..chunk_frames],
+                        );
+                    } else {
+                        data.dsp
+                            .process_post_effects(&mut data.processed[..chunk_frames]);
+                    }
 
                     // Soundboard ducking and mixing
                     let sound_idx = data.active_sound_index.load(Ordering::Relaxed);
@@ -1227,11 +1335,10 @@ impl Engine {
 
         let listener = stream
             .add_local_listener_with_user_data(data)
-            .state_changed(|_, data, _old, new| match new {
-                pw::stream::StreamState::Error(msg) => {
+            .state_changed(|_, data, _old, new| {
+                if let pw::stream::StreamState::Error(msg) = new {
                     data.shared.set_error(Some(format!("monitor: {msg}")));
                 }
-                _ => {}
             })
             .process(|stream, data| {
                 let Some(mut buffer) = stream.dequeue_buffer() else {
@@ -1584,21 +1691,24 @@ fn create_virtual_source(
         roundtrip(mainloop, core)?;
     }
 
-        let mut props = properties! {
-            "factory.name" => "support.null-audio-sink",
-            "node.name" => name,
-            "node.description" => description,
-            "media.class" => "Audio/Source/Virtual",
-            "audio.position" => "FL,FR",
-            "audio.channels" => "2",
-            "node.always-process" => "true",
-        };
-        if lock_quantum {
-            props.insert("node.force-quantum", quantum.max(1).to_string());
-            props.insert("node.lock-quantum", "true");
-        } else {
-            props.insert("node.latency", format!("{}/{}", quantum.max(1), SAMPLE_RATE));
-        }
+    let mut props = properties! {
+        "factory.name" => "support.null-audio-sink",
+        "node.name" => name,
+        "node.description" => description,
+        "media.class" => "Audio/Source/Virtual",
+        "audio.position" => "FL,FR",
+        "audio.channels" => "2",
+        "node.always-process" => "true",
+    };
+    if lock_quantum {
+        props.insert("node.force-quantum", quantum.max(1).to_string());
+        props.insert("node.lock-quantum", "true");
+    } else {
+        props.insert(
+            "node.latency",
+            format!("{}/{}", quantum.max(1), SAMPLE_RATE),
+        );
+    }
     let node = core
         .create_object::<pw::node::Node>("adapter", &props)
         .context("no se pudo crear el micrófono virtual (factory adapter)")?;
@@ -1708,11 +1818,16 @@ mod tests {
             }
         }
 
-        assert_eq!(drops, 0, "no drops should occur with steady rate and sufficient capacity");
-        assert_eq!(underruns, 0, "no underruns should occur after priming in steady state");
+        assert_eq!(
+            drops, 0,
+            "no drops should occur with steady rate and sufficient capacity"
+        );
+        assert_eq!(
+            underruns, 0,
+            "no underruns should occur after priming in steady state"
+        );
         assert!(primed, "bridge should have primed successfully");
         assert!(captured_total > 0, "audio should have been captured");
         assert!(played_total > 0, "audio should have been played");
     }
 }
-
